@@ -178,7 +178,7 @@ def error_handling_example(client: OpenAI):
     
     try:
         # This might fail if Claude Code has issues
-        response = client.chat.completions.create(
+        client.chat.completions.create(
             model="invalid-model",
             messages=[
                 {"role": "user", "content": "Test"}

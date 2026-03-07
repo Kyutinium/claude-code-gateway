@@ -6,7 +6,6 @@ Tests the MessageAdapter class for message format conversion.
 These are pure unit tests that don't require a running server.
 """
 
-import pytest
 from types import SimpleNamespace
 
 from src.message_adapter import MessageAdapter

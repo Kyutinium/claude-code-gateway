@@ -41,7 +41,7 @@ def test_default_temp_directory():
         # Clean up manually for testing
         if cli.temp_dir and os.path.exists(cli.temp_dir):
             shutil.rmtree(cli.temp_dir)
-            print(f"  ✓ Cleaned up temp directory")
+            print("  ✓ Cleaned up temp directory")
 
     except AssertionError as e:
         print(f"  ✗ {e}")
@@ -130,11 +130,11 @@ def test_nonexistent_directory_error():
     try:
         # Try to create CLI instance with non-existent directory
         ClaudeCodeCLI(cwd=non_existent_dir)
-        print(f"  ✗ Should have raised an error for non-existent directory")
+        print("  ✗ Should have raised an error for non-existent directory")
         raise AssertionError("Expected ValueError for non-existent directory")
     except ValueError as e:
         assert "does not exist" in str(e)
-        print(f"  ✓ Correctly raised error for non-existent directory")
+        print("  ✓ Correctly raised error for non-existent directory")
     except Exception as e:
         print(f"  ✗ Unexpected error type: {e}")
         raise
@@ -160,7 +160,7 @@ def test_cross_platform_compatibility():
         assert cli.cwd.exists(), "Working directory should exist"
 
         print(f"  ✓ Platform: {os.name}")
-        print(f"  ✓ Temp directory created correctly")
+        print("  ✓ Temp directory created correctly")
 
         # Clean up
         if cli.temp_dir and os.path.exists(cli.temp_dir):

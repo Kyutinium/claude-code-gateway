@@ -60,7 +60,7 @@ class TestConstants:
 
     def test_claude_models_defined(self):
         """Test that CLAUDE_MODELS constant exists and has expected models."""
-        from src.constants import CLAUDE_MODELS, DEFAULT_MODEL
+        from src.constants import CLAUDE_MODELS
 
         assert isinstance(CLAUDE_MODELS, list)
         assert len(CLAUDE_MODELS) > 0

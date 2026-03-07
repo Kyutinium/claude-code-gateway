@@ -8,7 +8,6 @@ These are pure unit tests that don't require a running server.
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 
 from src.session_manager import Session, SessionManager

@@ -8,11 +8,9 @@ error handling, chunk processing, and real-time display.
 
 from openai import OpenAI
 import time
-import sys
 import os
 import requests
-from typing import Optional, Generator
-import json
+from typing import Optional
 
 
 def get_api_key(base_url: str = "http://localhost:8000") -> Optional[str]:
@@ -87,7 +85,7 @@ class StreamingClient:
                     
                 if chunk.choices[0].finish_reason:
                     total_time = time.time() - start_time
-                    print(f"\n\n[Streaming completed]")
+                    print("\n\n[Streaming completed]")
                     print(f"[Total time: {total_time:.2f}s]")
                     print(f"[Approximate tokens: {token_count}]")
                     print(f"[Finish reason: {chunk.choices[0].finish_reason}]")
@@ -100,7 +98,7 @@ class StreamingClient:
     def stream_with_processing(self, messages: list, process_func=None):
         """Stream response with custom processing function."""
         if process_func is None:
-            process_func = lambda x: x  # Default: no processing
+            def process_func(x): return x
             
         stream = self.client.chat.completions.create(
             model="claude-3-5-sonnet-20241022",

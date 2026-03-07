@@ -5,7 +5,6 @@ Property-based tests using Hypothesis for edge case discovery.
 These tests generate random inputs to find edge cases that manual testing might miss.
 """
 
-import pytest
 from hypothesis import given, strategies as st, settings, assume
 
 from src.message_adapter import MessageAdapter

@@ -4,7 +4,6 @@ Unit tests for src/mcp_config.py
 """
 
 import json
-import pytest
 from unittest.mock import patch
 from src.mcp_config import load_mcp_config
 

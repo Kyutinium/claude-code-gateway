@@ -14,8 +14,8 @@ import pytest
 
 import src.main as main
 from src.constants import DEFAULT_HOST, DEFAULT_MODEL, DEFAULT_PORT
-from src.models import ChatCompletionRequest, Message
-from src.streaming_utils import stream_chunks
+from src.models import ChatCompletionRequest, Message, StreamOptions, Usage
+from src.streaming_utils import is_assistant_content_chunk, make_sse, map_stop_reason, stream_chunks
 
 
 def _parse_chat_sse(line: str) -> dict:
@@ -814,12 +814,6 @@ def test_parse_response_id_rejects_invalid_formats(response_id):
 # NEW TESTS: Additional coverage
 # ---------------------------------------------------------------------------
 
-from src.streaming_utils import (
-    make_sse,
-    is_assistant_content_chunk,
-    map_stop_reason,
-)
-from src.models import StreamOptions, Usage
 
 
 class TestBuildClaudeOptionsWithHeaders:

@@ -174,7 +174,7 @@ def main():
     
     try:
         # Test server connection
-        health_response = client.chat.completions.create(
+        client.chat.completions.create(
             model="claude-3-5-sonnet-20241022",
             messages=[{"role": "user", "content": "Hello!"}]
         )

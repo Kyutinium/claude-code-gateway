@@ -589,7 +589,6 @@ class TestMultipleSessionsIsolation:
             nonlocal max_inflight
 
             session_key = kwargs.get("session_id") or kwargs.get("resume")
-            prompt = kwargs["prompt"]
             reply_text = f"reply-for-{session_key}"
 
             captured_kwargs[session_key] = dict(kwargs)
