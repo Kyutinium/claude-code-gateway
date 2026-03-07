@@ -294,6 +294,27 @@ class Pipe:
                         if delta:
                             yield delta
 
+                    elif event_type == "response.task_started":
+                        desc = event.get("description", "")
+                        if desc:
+                            yield f"\n\n> **Task started**: {desc}\n"
+
+                    elif event_type == "response.task_progress":
+                        desc = event.get("description", "")
+                        tool = event.get("last_tool_name", "")
+                        usage = event.get("usage") or {}
+                        uses = usage.get("tool_uses", 0)
+                        text = f"\n> **Task progress**: {desc}"
+                        if tool:
+                            text += f" (tool: {tool}, uses: {uses})"
+                        yield text + "\n"
+
+                    elif event_type == "response.task_notification":
+                        status = event.get("status", "")
+                        summary = event.get("summary", "")
+                        if summary:
+                            yield f"\n> **Task {status}**: {summary}\n\n"
+
                     elif event_type == "response.completed":
                         completed = True
                         response_obj = event.get("response", {})
