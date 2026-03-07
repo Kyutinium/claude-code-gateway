@@ -58,58 +58,29 @@ class TestClaudeCodeAuthManagerDetectMethod:
             importlib.reload(src.auth)
             assert src.auth.auth_manager.auth_method == "anthropic"
 
-    def test_explicit_bedrock_method(self):
-        """CLAUDE_AUTH_METHOD=bedrock uses bedrock."""
-        with patch.dict(os.environ, {"CLAUDE_AUTH_METHOD": "bedrock"}, clear=False):
-            import src.auth
-
-            importlib.reload(src.auth)
-            assert src.auth.auth_manager.auth_method == "bedrock"
-
-    def test_explicit_vertex_method(self):
-        """CLAUDE_AUTH_METHOD=vertex uses vertex."""
-        with patch.dict(os.environ, {"CLAUDE_AUTH_METHOD": "vertex"}, clear=False):
-            import src.auth
-
-            importlib.reload(src.auth)
-            assert src.auth.auth_manager.auth_method == "vertex"
-
-    def test_unknown_method_falls_back(self):
-        """Unknown CLAUDE_AUTH_METHOD falls back to auto-detect."""
+    def test_unknown_method_raises_error(self):
+        """Unknown CLAUDE_AUTH_METHOD raises ValueError."""
         with patch.dict(os.environ, {"CLAUDE_AUTH_METHOD": "unknown_method"}, clear=False):
             import src.auth
 
-            importlib.reload(src.auth)
-            # Should fall back to claude_cli (default)
-            assert src.auth.auth_manager.auth_method in [
-                "claude_cli",
-                "anthropic",
-                "bedrock",
-                "vertex",
-            ]
+            with pytest.raises(ValueError, match="Unsupported CLAUDE_AUTH_METHOD"):
+                importlib.reload(src.auth)
 
-    def test_legacy_bedrock_env_var(self):
-        """CLAUDE_CODE_USE_BEDROCK=1 uses bedrock."""
-        env = {"CLAUDE_CODE_USE_BEDROCK": "1"}
-        # Remove CLAUDE_AUTH_METHOD if present
-        env_copy = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTH_METHOD"}
-        env_copy.update(env)
-        with patch.dict(os.environ, env_copy, clear=True):
+    def test_bedrock_method_raises_error(self):
+        """CLAUDE_AUTH_METHOD=bedrock raises ValueError (no longer supported)."""
+        with patch.dict(os.environ, {"CLAUDE_AUTH_METHOD": "bedrock"}, clear=False):
             import src.auth
 
-            importlib.reload(src.auth)
-            assert src.auth.auth_manager.auth_method == "bedrock"
+            with pytest.raises(ValueError, match="Unsupported CLAUDE_AUTH_METHOD"):
+                importlib.reload(src.auth)
 
-    def test_legacy_vertex_env_var(self):
-        """CLAUDE_CODE_USE_VERTEX=1 uses vertex."""
-        env = {"CLAUDE_CODE_USE_VERTEX": "1"}
-        env_copy = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTH_METHOD"}
-        env_copy.update(env)
-        with patch.dict(os.environ, env_copy, clear=True):
+    def test_vertex_method_raises_error(self):
+        """CLAUDE_AUTH_METHOD=vertex raises ValueError (no longer supported)."""
+        with patch.dict(os.environ, {"CLAUDE_AUTH_METHOD": "vertex"}, clear=False):
             import src.auth
 
-            importlib.reload(src.auth)
-            assert src.auth.auth_manager.auth_method == "vertex"
+            with pytest.raises(ValueError, match="Unsupported CLAUDE_AUTH_METHOD"):
+                importlib.reload(src.auth)
 
     def test_auto_detect_anthropic_key(self):
         """ANTHROPIC_AUTH_TOKEN auto-detects to anthropic."""
@@ -117,7 +88,7 @@ class TestClaudeCodeAuthManagerDetectMethod:
         env_copy = {
             k: v
             for k, v in os.environ.items()
-            if k not in ["CLAUDE_AUTH_METHOD", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]
+            if k not in ["CLAUDE_AUTH_METHOD"]
         }
         env_copy.update(env)
         with patch.dict(os.environ, env_copy, clear=True):
@@ -134,8 +105,6 @@ class TestClaudeCodeAuthManagerDetectMethod:
             if k
             not in [
                 "CLAUDE_AUTH_METHOD",
-                "CLAUDE_CODE_USE_BEDROCK",
-                "CLAUDE_CODE_USE_VERTEX",
                 "ANTHROPIC_AUTH_TOKEN",
             ]
         }
@@ -189,76 +158,6 @@ class TestClaudeCodeAuthManagerValidation:
             status = src.auth.auth_manager.auth_status
             assert status["valid"] is True
 
-    def test_validate_bedrock_valid(self):
-        """Valid Bedrock config passes validation."""
-        with patch.dict(
-            os.environ,
-            {
-                "CLAUDE_AUTH_METHOD": "bedrock",
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-                "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                "AWS_REGION": "us-east-1",
-            },
-        ):
-            import src.auth
-
-            importlib.reload(src.auth)
-            status = src.auth.auth_manager.auth_status
-            assert status["valid"] is True
-            assert status["method"] == "bedrock"
-
-    def test_validate_bedrock_missing_credentials(self):
-        """Missing AWS credentials fails Bedrock validation."""
-        env_copy = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"]
-        }
-        env_copy["CLAUDE_AUTH_METHOD"] = "bedrock"
-        env_copy["CLAUDE_CODE_USE_BEDROCK"] = "1"
-        with patch.dict(os.environ, env_copy, clear=True):
-            import src.auth
-
-            importlib.reload(src.auth)
-            status = src.auth.auth_manager.auth_status
-            assert status["valid"] is False
-            assert len(status["errors"]) > 0
-
-    def test_validate_vertex_valid(self):
-        """Valid Vertex config passes validation."""
-        with patch.dict(
-            os.environ,
-            {
-                "CLAUDE_AUTH_METHOD": "vertex",
-                "CLAUDE_CODE_USE_VERTEX": "1",
-                "ANTHROPIC_VERTEX_PROJECT_ID": "my-project-123",
-                "CLOUD_ML_REGION": "us-central1",
-            },
-        ):
-            import src.auth
-
-            importlib.reload(src.auth)
-            status = src.auth.auth_manager.auth_status
-            assert status["valid"] is True
-            assert status["method"] == "vertex"
-
-    def test_validate_vertex_missing_config(self):
-        """Missing Vertex config fails validation."""
-        env_copy = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in ["ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION"]
-        }
-        env_copy["CLAUDE_AUTH_METHOD"] = "vertex"
-        env_copy["CLAUDE_CODE_USE_VERTEX"] = "1"
-        with patch.dict(os.environ, env_copy, clear=True):
-            import src.auth
-
-            importlib.reload(src.auth)
-            status = src.auth.auth_manager.auth_status
-            assert status["valid"] is False
-
     def test_validate_claude_cli_always_valid(self):
         """Claude CLI auth is always considered valid initially."""
         env_copy = {k: v for k, v in os.environ.items() if k != "CLAUDE_AUTH_METHOD"}
@@ -290,46 +189,6 @@ class TestClaudeCodeAuthManagerEnvVars:
             env_vars = src.auth.auth_manager.get_claude_code_env_vars()
             assert "ANTHROPIC_AUTH_TOKEN" in env_vars
             assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "test-key-12345"
-
-    def test_bedrock_env_vars(self):
-        """Bedrock method returns AWS credentials."""
-        with patch.dict(
-            os.environ,
-            {
-                "CLAUDE_AUTH_METHOD": "bedrock",
-                "CLAUDE_CODE_USE_BEDROCK": "1",
-                "AWS_ACCESS_KEY_ID": "AKIATEST",
-                "AWS_SECRET_ACCESS_KEY": "secretkey",
-                "AWS_REGION": "us-east-1",
-            },
-        ):
-            import src.auth
-
-            importlib.reload(src.auth)
-            env_vars = src.auth.auth_manager.get_claude_code_env_vars()
-            assert env_vars.get("CLAUDE_CODE_USE_BEDROCK") == "1"
-            assert "AWS_ACCESS_KEY_ID" in env_vars
-            assert "AWS_SECRET_ACCESS_KEY" in env_vars
-            assert "AWS_REGION" in env_vars
-
-    def test_vertex_env_vars(self):
-        """Vertex method returns Google Cloud credentials."""
-        with patch.dict(
-            os.environ,
-            {
-                "CLAUDE_AUTH_METHOD": "vertex",
-                "CLAUDE_CODE_USE_VERTEX": "1",
-                "ANTHROPIC_VERTEX_PROJECT_ID": "my-project",
-                "CLOUD_ML_REGION": "us-central1",
-            },
-        ):
-            import src.auth
-
-            importlib.reload(src.auth)
-            env_vars = src.auth.auth_manager.get_claude_code_env_vars()
-            assert env_vars.get("CLAUDE_CODE_USE_VERTEX") == "1"
-            assert "ANTHROPIC_VERTEX_PROJECT_ID" in env_vars
-            assert "CLOUD_ML_REGION" in env_vars
 
     def test_cli_env_vars_empty(self):
         """CLI method returns no environment variables."""

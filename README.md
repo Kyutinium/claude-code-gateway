@@ -31,7 +31,7 @@ curl http://localhost:8000/v1/chat/completions \
 - **Anthropic API Compatible** — `/v1/messages` endpoint
 - **Responses API** — `/v1/responses` with `previous_response_id` chaining
 - **Session Management** — Multi-turn conversations via `session_id`
-- **Multi-Provider Auth** — API key, AWS Bedrock, Google Vertex AI, CLI auth
+- **Auth Support** — API key or CLI auth
 - **MCP Server Integration** — Connect external tool servers at startup
 - **Subagent Control** — Block specific subagent types per deployment
 - **Adaptive Thinking** — Configurable thinking modes and budget
@@ -59,8 +59,6 @@ The Claude Code CLI is bundled with `claude-agent-sdk` — no separate Node.js o
 |--------|-------|
 | API Key (recommended) | `export ANTHROPIC_AUTH_TOKEN=your-key` |
 | CLI Auth | `claude auth login` |
-| AWS Bedrock | Set `CLAUDE_AUTH_METHOD=bedrock`, `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
-| Google Vertex AI | Set `CLAUDE_AUTH_METHOD=vertex`, `CLAUDE_CODE_USE_VERTEX=1`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` |
 
 ## Configuration
 
@@ -216,9 +214,9 @@ uv run ruff check --fix . && uv run ruff format .   # Lint & format
 
 ## Terms Compliance
 
-You must use your own Claude access (API key, CLI auth, Bedrock, or Vertex AI) to use this gateway.
+You must use your own Claude access (API key or CLI auth) to use this gateway.
 
-This project is a gateway layer on top of the official Claude Agent SDK. It does not pool credentials, resell access, or bypass Anthropic authentication. For commercial or scaled deployments, use Anthropic API, Bedrock, or Vertex AI.
+This project is a gateway layer on top of the official Claude Agent SDK. It does not pool credentials, resell access, or bypass Anthropic authentication.
 
 - [Usage Policy](https://www.anthropic.com/legal/aup)
 - [Consumer Terms](https://www.anthropic.com/legal/consumer-terms)

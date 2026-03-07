@@ -569,14 +569,6 @@ def build_root_page(version: str, auth_info: Dict[str, Any], default_port: int) 
                         <code class="green-code">api_key</code>
                         <p>ANTHROPIC_AUTH_TOKEN</p>
                     </div>
-                    <div class="config-item">
-                        <code class="green-code">bedrock</code>
-                        <p>AWS Bedrock</p>
-                    </div>
-                    <div class="config-item">
-                        <code class="green-code">vertex</code>
-                        <p>Google Vertex AI</p>
-                    </div>
                 </div>
             </article>
 

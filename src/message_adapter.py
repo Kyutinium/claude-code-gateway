@@ -1,5 +1,6 @@
 from typing import List, Optional
 from src.models import Message
+import os
 import re
 import json
 
@@ -7,7 +8,7 @@ import json
 class MessageAdapter:
     """Converts between OpenAI message format and Claude Code prompts."""
 
-    TOOL_RESULT_MAX_LENGTH = 2000
+    TOOL_RESULT_MAX_LENGTH = int(os.getenv("TOOL_RESULT_MAX_LENGTH", "2000"))
 
     @staticmethod
     def _truncate_tool_content(content):

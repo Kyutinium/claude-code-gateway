@@ -31,7 +31,7 @@ from src.models import (
 from src.claude_cli import ClaudeCodeCLI
 from src.landing_page import build_root_page
 from src.message_adapter import MessageAdapter
-from src.auth import verify_api_key, security, validate_claude_code_auth, get_claude_code_auth_info
+from src.auth import verify_api_key, security, validate_claude_code_auth, get_claude_code_auth_info, auth_manager
 from src.parameter_validator import ParameterValidator, CompatibilityReporter
 from src.session_manager import session_manager
 from src.response_models import (
@@ -147,6 +147,9 @@ async def lifespan(app: FastAPI):
     """Verify Claude Code authentication and CLI on startup."""
     logger.info("Verifying Claude Code authentication and CLI...")
 
+    # Clean stale Bedrock/Vertex env vars before anything else
+    auth_manager.clean_stale_env_vars()
+
     # Validate authentication first
     auth_valid, auth_info = validate_claude_code_auth()
 
@@ -156,8 +159,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"  - {error}")
         logger.warning("Authentication setup guide:")
         logger.warning("  1. For Anthropic API: Set ANTHROPIC_AUTH_TOKEN")
-        logger.warning("  2. For Bedrock: Set CLAUDE_CODE_USE_BEDROCK=1 + AWS credentials")
-        logger.warning("  3. For Vertex AI: Set CLAUDE_CODE_USE_VERTEX=1 + GCP credentials")
+        logger.warning("  2. For CLI auth: Run 'claude auth login'")
     else:
         logger.info(f"✅ Claude Code authentication validated: {auth_info['method']}")
 
