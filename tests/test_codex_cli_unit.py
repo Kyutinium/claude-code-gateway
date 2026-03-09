@@ -1059,13 +1059,141 @@ class TestNormalizeCollabToolCallEvent:
         assert result_block["tool_use_id"] == spawn_tool_id
 
 
+    def test_mixed_toplevel_spawn_embedded_wait_correlation(self):
+        """Top-level collab spawn_agent + embedded wait in agent_message
+        correlate through the shared agent_tool_ids dict."""
+        shared_ids: dict = {}
+
+        # Top-level spawn_agent event
+        spawn_event = {
+            "type": "collab_tool_call",
+            "tool": "spawn_agent",
+            "prompt": "Research something",
+            "receiver_thread_ids": ["mix-thread"],
+            "agents_states": {},
+        }
+        r1 = normalize_codex_event(spawn_event, agent_tool_ids=shared_ids)
+        assert r1 is not None
+        spawn_block = next(b for b in r1["content"] if b["type"] == "tool_use")
+        spawn_tool_id = spawn_block["id"]
+
+        # Embedded wait in agent_message item.completed
+        wait_json = json.dumps(
+            {
+                "collab_tool_call": {
+                    "tool": "wait",
+                    "agents_states": {
+                        "mix-thread": {"status": "completed", "message": "Mixed result"},
+                    },
+                }
+            }
+        )
+        item_event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": f"Done\n{wait_json}"},
+        }
+        r2 = normalize_codex_event(item_event, agent_tool_ids=shared_ids)
+        assert r2 is not None
+        result_block = next(b for b in r2["content"] if b["type"] == "tool_result")
+        assert result_block["tool_use_id"] == spawn_tool_id
+
+    def test_mixed_embedded_spawn_toplevel_wait_correlation(self):
+        """Embedded spawn_agent in agent_message + top-level wait event
+        correlate through the shared agent_tool_ids dict."""
+        shared_ids: dict = {}
+
+        # Embedded spawn in agent_message item.completed
+        spawn_json = json.dumps(
+            {
+                "collab_tool_call": {
+                    "tool": "spawn_agent",
+                    "prompt": "Investigate",
+                    "receiver_thread_ids": ["rev-thread"],
+                    "agents_states": {},
+                }
+            }
+        )
+        item_event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": f"Starting\n{spawn_json}"},
+        }
+        r1 = normalize_codex_event(item_event, agent_tool_ids=shared_ids)
+        assert r1 is not None
+        spawn_block = next(b for b in r1["content"] if b["type"] == "tool_use")
+        spawn_tool_id = spawn_block["id"]
+
+        # Top-level wait event
+        wait_event = {
+            "type": "collab_tool_call",
+            "tool": "wait",
+            "agents_states": {
+                "rev-thread": {"status": "completed", "message": "Reverse result"},
+            },
+        }
+        r2 = normalize_codex_event(wait_event, agent_tool_ids=shared_ids)
+        assert r2 is not None
+        result_block = next(b for b in r2["content"] if b["type"] == "tool_result")
+        assert result_block["tool_use_id"] == spawn_tool_id
+
+
+def _make_delayed_mock_process(
+    jsonl_lines: list,
+    barrier: asyncio.Event,
+    is_first: bool,
+    returncode: int = 0,
+) -> MagicMock:
+    """Create a mock process whose stdout feeds lines with a synchronization
+    barrier, ensuring two concurrent completions truly overlap.
+
+    The *first* caller feeds its spawn line, then sets the barrier and waits
+    for the other side to also pass the barrier before feeding the rest.
+    The *second* caller waits on the barrier before starting, ensuring both
+    run_completion coroutines are active simultaneously.
+    """
+    reader = asyncio.StreamReader()
+
+    async def _feed():
+        for i, line in enumerate(jsonl_lines):
+            data = line.encode() if isinstance(line, str) else line
+            reader.feed_data(data + b"\n")
+            if i == 1:  # After thread.started + spawn line
+                if is_first:
+                    barrier.set()
+                    # Yield control so the second task can start
+                    await asyncio.sleep(0)
+                else:
+                    await barrier.wait()
+        reader.feed_eof()
+
+    # Schedule feeding as a background task
+    asyncio.get_event_loop().create_task(_feed())
+
+    proc = MagicMock()
+    proc.stdin = MagicMock()
+    proc.stdin.write = MagicMock()
+    proc.stdin.drain = AsyncMock()
+    proc.stdin.close = MagicMock()
+    proc.stdout = reader
+    proc.stderr = asyncio.StreamReader()
+    proc.stderr.feed_eof()
+    proc.returncode = returncode
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.terminate = MagicMock()
+    proc.kill = MagicMock()
+    return proc
+
+
 class TestConcurrentRunCompletionIsolation:
     """Verify that concurrent run_completion calls on the same CodexCLI
-    instance do not cross-wire collab agent_tool_ids (Round 3 regression)."""
+    instance do not cross-wire collab agent_tool_ids (Round 3 regression).
+
+    Uses a synchronization barrier to ensure both coroutines are active
+    simultaneously, not just sequentially scheduled via asyncio.gather.
+    """
 
     async def test_concurrent_completions_isolated(self, codex_cli):
-        """Two concurrent run_completion() calls each track their own
-        collab spawn→wait correlation without interference."""
+        """Two overlapping run_completion() calls on the same CodexCLI
+        instance verify tool_use_id isolation (no cross-wiring)."""
         spawn_a = json.dumps(
             {
                 "type": "collab_tool_call",
@@ -1116,18 +1244,25 @@ class TestConcurrentRunCompletionIsolation:
             json.dumps({"type": "turn.completed", "usage": {}}),
         ]
 
-        async def collect(jsonl_lines):
-            return await _run_with_mock(codex_cli, jsonl_lines)
+        barrier = asyncio.Event()
 
-        # Run both completions concurrently on the SAME instance
-        import asyncio
+        async def collect(jsonl_lines, is_first):
+            with patch.object(codex_cli, "_spawn_codex") as mock_spawn:
+                mock_proc = _make_delayed_mock_process(
+                    jsonl_lines, barrier, is_first=is_first
+                )
+                mock_spawn.return_value = _AsyncCM(mock_proc)
+                chunks = []
+                async for chunk in codex_cli.run_completion("test"):
+                    chunks.append(chunk)
+            return chunks
 
+        # Run both completions concurrently with barrier synchronization
         chunks_a, chunks_b = await asyncio.gather(
-            collect(lines_a),
-            collect(lines_b),
+            collect(lines_a, is_first=True),
+            collect(lines_b, is_first=False),
         )
 
-        # Extract tool_use and tool_result blocks from each stream
         def extract_blocks(chunks):
             tool_uses = []
             tool_results = []
@@ -1143,13 +1278,11 @@ class TestConcurrentRunCompletionIsolation:
         uses_a, results_a = extract_blocks(chunks_a)
         uses_b, results_b = extract_blocks(chunks_b)
 
-        # Each stream should have its own tool_use
         assert len(uses_a) >= 1
         assert len(uses_b) >= 1
         assert len(results_a) >= 1
         assert len(results_b) >= 1
 
-        # Correlation: A's tool_result references A's tool_use, not B's
         a_use_ids = {u["id"] for u in uses_a}
         b_use_ids = {u["id"] for u in uses_b}
         a_result_refs = {r["tool_use_id"] for r in results_a}
@@ -1158,5 +1291,9 @@ class TestConcurrentRunCompletionIsolation:
         # No overlap between A and B tool_use_ids
         assert a_use_ids.isdisjoint(b_use_ids), "Concurrent streams share tool_use ids!"
         # Each result references its own stream's tool_use
-        assert a_result_refs.issubset(a_use_ids), f"A results reference wrong ids: {a_result_refs - a_use_ids}"
-        assert b_result_refs.issubset(b_use_ids), f"B results reference wrong ids: {b_result_refs - b_use_ids}"
+        assert a_result_refs.issubset(a_use_ids), (
+            f"A results reference wrong ids: {a_result_refs - a_use_ids}"
+        )
+        assert b_result_refs.issubset(b_use_ids), (
+            f"B results reference wrong ids: {b_result_refs - b_use_ids}"
+        )
