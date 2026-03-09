@@ -54,22 +54,19 @@ def _extract_text_from_item(item: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _strip_collab_json(text: str) -> str:
-    """Remove embedded collab_tool_call JSON blocks from Codex agent_message text.
+def _extract_text_and_collab(text: str) -> tuple[str, list[Dict[str, Any]]]:
+    """Split agent_message text into plain text and collab_tool_call JSON objects.
 
-    Codex's collaborative agent feature embeds raw JSON objects like
-    ``{"id": "...", "type": "collab_tool_call", ...}`` inline in assistant
-    text.  These are internal orchestration data and should not be shown
-    to end users.  Uses brace-counting to handle arbitrarily nested objects.
+    Returns (cleaned_text, list_of_parsed_collab_dicts).
+    Uses brace-counting to handle arbitrarily nested JSON objects.
     """
     import re
 
-    result: list[str] = []
+    plain_parts: list[str] = []
+    collab_events: list[Dict[str, Any]] = []
     i = 0
     while i < len(text):
-        # Look for a potential collab JSON block start
         if text[i] == "{":
-            # Find the matching closing brace via depth counting
             depth = 0
             j = i
             while j < len(text):
@@ -82,16 +79,93 @@ def _strip_collab_json(text: str) -> str:
                 j += 1
             block = text[i : j + 1] if j < len(text) else text[i:]
             if "collab_tool_call" in block:
-                # Skip this block entirely
+                try:
+                    parsed = json.loads(block)
+                    collab_events.append(parsed)
+                except json.JSONDecodeError:
+                    plain_parts.append(block)
                 i = j + 1
                 continue
-        result.append(text[i])
+        plain_parts.append(text[i])
         i += 1
 
-    cleaned = "".join(result)
-    # Collapse multiple blank lines left by removal
+    cleaned = "".join(plain_parts)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
+    return cleaned.strip(), collab_events
+
+
+def _collab_to_tool_blocks(collab_events: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """Convert collab_tool_call events into tool_use / tool_result content blocks.
+
+    Mapping:
+    - spawn_agent  → tool_use (name="Agent")
+    - send_input   → tool_use (name="Agent")
+    - wait (with completed agent message) → tool_result
+    - close_agent  → skip (cleanup only)
+    """
+    blocks: list[Dict[str, Any]] = []
+    # Track spawn tool_use_ids so wait results can reference them
+    agent_tool_ids: Dict[str, str] = {}  # receiver_thread_id → tool_use_id
+
+    for event in collab_events:
+        tool = event.get("tool", "")
+        agents_states = event.get("agents_states", {})
+
+        if tool == "spawn_agent":
+            prompt = event.get("prompt", "")
+            receivers = event.get("receiver_thread_ids", [])
+            tool_id = f"codex_agent_{uuid.uuid4().hex[:12]}"
+            # Track for later tool_result matching
+            for rid in receivers:
+                agent_tool_ids[rid] = tool_id
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": "Agent",
+                    "input": {"prompt": prompt},
+                }
+            )
+
+        elif tool == "send_input":
+            prompt = event.get("prompt", "")
+            receivers = event.get("receiver_thread_ids", [])
+            tool_id = f"codex_agent_{uuid.uuid4().hex[:12]}"
+            for rid in receivers:
+                agent_tool_ids[rid] = tool_id
+            if prompt:
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": "Agent",
+                        "input": {"prompt": prompt},
+                    }
+                )
+
+        elif tool == "wait":
+            # Extract completed agent results
+            for agent_id, state in agents_states.items():
+                if state.get("status") == "completed" and state.get("message"):
+                    parent_id = agent_tool_ids.get(agent_id, f"codex_agent_{uuid.uuid4().hex[:12]}")
+                    blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": parent_id,
+                            "content": state["message"],
+                            "is_error": False,
+                        }
+                    )
+
+        # close_agent → skip (cleanup)
+
+    return blocks
+
+
+def _strip_collab_json(text: str) -> str:
+    """Remove embedded collab_tool_call JSON blocks (backward compat wrapper)."""
+    cleaned, _ = _extract_text_and_collab(text)
+    return cleaned
 
 
 def _build_content_blocks(item: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -99,10 +173,16 @@ def _build_content_blocks(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     item_type = item.get("type")
 
     if item_type == "agent_message":
-        text = _strip_collab_json(item.get("text", ""))
-        if not text:
-            return []
-        return [{"type": "text", "text": text}]
+        raw_text = item.get("text", "")
+        cleaned_text, collab_events = _extract_text_and_collab(raw_text)
+        blocks: List[Dict[str, Any]] = []
+        # Convert collab events to tool_use/tool_result blocks
+        if collab_events:
+            blocks.extend(_collab_to_tool_blocks(collab_events))
+        # Add remaining plain text
+        if cleaned_text:
+            blocks.append({"type": "text", "text": cleaned_text})
+        return blocks
 
     if item_type == "reasoning":
         text = item.get("text", "")
