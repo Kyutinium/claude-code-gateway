@@ -115,7 +115,7 @@ class ClaudeAuthProvider(BackendAuthProvider):
 
 
 class CodexAuthProvider(BackendAuthProvider):
-    """Codex backend auth — uses upstream-standard OPENAI_API_KEY."""
+    """Codex backend auth — OPENAI_API_KEY is optional (Codex CLI handles its own auth)."""
 
     @property
     def name(self) -> str:
@@ -123,18 +123,10 @@ class CodexAuthProvider(BackendAuthProvider):
 
     def validate(self) -> Dict[str, Any]:
         key = os.getenv("OPENAI_API_KEY")
-        if not key:
-            return {
-                "valid": False,
-                "errors": ["OPENAI_API_KEY environment variable not set"],
-                "config": {},
-            }
-        if not key.startswith("sk-"):
-            logger.warning("OPENAI_API_KEY doesn't match expected sk-... format")
         return {
             "valid": True,
             "errors": [],
-            "config": {"api_key_present": True, "api_key_length": len(key)},
+            "config": {"api_key_present": bool(key)},
         }
 
     def build_env(self) -> Dict[str, str]:

@@ -61,7 +61,9 @@ def resolve_model(model: str) -> ResolvedModel:
 
     # Exact match against known Codex model names
     if model in CODEX_MODELS:
-        return ResolvedModel(public_model=model, backend="codex", provider_model=None)
+        from src.constants import CODEX_DEFAULT_MODEL
+
+        return ResolvedModel(public_model=model, backend="codex", provider_model=CODEX_DEFAULT_MODEL)
 
     # Default: Claude backend
     return ResolvedModel(public_model=model, backend="claude", provider_model=model)

@@ -223,8 +223,7 @@ class TestBuildContentBlocks:
     def test_agent_message_empty_text(self):
         item = {"type": "agent_message", "text": ""}
         blocks = _build_content_blocks(item)
-        assert blocks[0]["type"] == "text"
-        assert blocks[0]["text"] == ""
+        assert blocks == []
 
     def test_file_change_delete_kind(self):
         item = {"type": "file_change", "changes": [{"path": "old.py", "kind": "delete"}]}
@@ -398,6 +397,7 @@ class TestFindCodexBinary:
 class TestBuildEnv:
     def test_openai_key_injected(self, codex_cli, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+        codex_cli._api_key = "sk-test-key"  # simulate init-time capture
         env = codex_cli._build_env()
         assert env["OPENAI_API_KEY"] == "sk-test-key"
 

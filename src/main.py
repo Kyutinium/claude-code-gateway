@@ -58,7 +58,6 @@ from src.rate_limiter import (
 )
 from src.constants import (
     CLAUDE_TOOLS,
-    CODEX_ENABLED,
     DEFAULT_ALLOWED_TOOLS,
     DEFAULT_TIMEOUT_MS,
     DEFAULT_PORT,
@@ -155,19 +154,14 @@ claude_cli = ClaudeCodeCLI(timeout=DEFAULT_TIMEOUT_MS, cwd=os.getenv("CLAUDE_CWD
 def _init_backend_registry() -> None:
     """Register backend clients into the global BackendRegistry.
 
-    Called once during lifespan startup.  Claude is always registered.
-    Codex is registered only when ``CODEX_ENABLED=true`` and the binary
-    is available.
+    Called once during lifespan startup.  Both Claude and Codex are always
+    registered.  If the Codex binary is missing, registration fails gracefully.
     """
     # Claude — always registered
     BackendRegistry.register("claude", claude_cli)
     logger.info("Registered backend: claude")
 
-    # Codex — conditional on feature flag
-    if not CODEX_ENABLED:
-        logger.info("Codex backend disabled (CODEX_ENABLED=false)")
-        return
-
+    # Codex — always attempted (fails gracefully if binary missing)
     try:
         from src.codex_cli import CodexCLI
 
@@ -473,8 +467,8 @@ def _resolve_and_get_backend(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Codex backend is not enabled. "
-                    f"Set CODEX_ENABLED=true and install Codex CLI to use model '{model}'."
+                    f"Codex backend is not available. "
+                    f"Install Codex CLI to use model '{model}'."
                 ),
             )
         raise HTTPException(
@@ -1356,7 +1350,7 @@ async def get_auth_status(request: Request):
                 else ("runtime" if runtime_api_key else "none")
             ),
             "registered_backends": registered_backends,
-            "codex_enabled": CODEX_ENABLED,
+            "codex_available": BackendRegistry.is_registered("codex"),
             "version": "1.0.0",
         },
     }

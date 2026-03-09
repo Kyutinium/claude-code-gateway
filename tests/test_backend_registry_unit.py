@@ -23,7 +23,7 @@ class TestResolveModel:
     def test_codex_bare(self):
         r = resolve_model("codex")
         assert r.backend == "codex"
-        assert r.provider_model is None
+        assert r.provider_model == "gpt-5.4"  # default model
         assert r.public_model == "codex"
 
     def test_codex_slash_submodel(self):

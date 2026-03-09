@@ -190,14 +190,14 @@ class TestCrossIsolationEnv:
 class TestCodexAuthValidation:
     """Test Codex authentication error handling."""
 
-    def test_missing_openai_key_error_message(self):
-        """Missing OPENAI_API_KEY produces a clear error."""
+    def test_missing_openai_key_still_valid(self):
+        """Missing OPENAI_API_KEY is valid — Codex CLI handles its own auth."""
         env_copy = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         with patch.dict(os.environ, env_copy, clear=True):
             provider = CodexAuthProvider()
             status = provider.validate()
-            assert status["valid"] is False
-            assert "OPENAI_API_KEY" in status["errors"][0]
+            assert status["valid"] is True
+            assert status["config"]["api_key_present"] is False
 
     def test_non_sk_key_still_valid(self):
         """Non-sk- prefixed key is accepted (with warning)."""

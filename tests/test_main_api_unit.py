@@ -29,11 +29,13 @@ def client_context():
     if main.limiter and hasattr(main.limiter, "_storage"):
         main.limiter._storage.reset()
 
-    # Register mock_cli as the "claude" backend so BackendRegistry.get("claude")
-    # works after Phase 3 refactors endpoints to use backend dispatch.
-    BackendRegistry.register("claude", mock_cli)
+    # Patch _init_backend_registry to prevent real Codex CLI registration,
+    # then register mock_cli as the "claude" backend for backend dispatch.
+    def _mock_init_registry():
+        BackendRegistry.register("claude", mock_cli)
 
     with (
+        patch.object(main, "_init_backend_registry", _mock_init_registry),
         patch.object(main, "claude_cli", mock_cli),
         patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
         patch.object(main, "validate_claude_code_auth", return_value=(True, {"method": "test"})),

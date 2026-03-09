@@ -448,15 +448,15 @@ class TestBackendAuthProviders:
         assert provider.name == "codex"
 
     def test_codex_validate_missing_key(self):
-        """CodexAuthProvider fails when OPENAI_API_KEY is not set."""
+        """CodexAuthProvider passes even without OPENAI_API_KEY (Codex handles own auth)."""
         env_copy = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         with patch.dict(os.environ, env_copy, clear=True):
             from src.auth import CodexAuthProvider
 
             provider = CodexAuthProvider()
             status = provider.validate()
-            assert status["valid"] is False
-            assert any("OPENAI_API_KEY" in e for e in status["errors"])
+            assert status["valid"] is True
+            assert status["config"]["api_key_present"] is False
 
     def test_codex_validate_valid_key(self):
         """CodexAuthProvider passes with a valid sk-... key."""
@@ -610,14 +610,14 @@ class TestValidateBackendAuth:
             assert status["method"] == "claude"
 
     def test_validate_codex_backend_missing_key(self):
-        """validate_backend_auth('codex') fails without OPENAI_API_KEY."""
+        """validate_backend_auth('codex') passes even without OPENAI_API_KEY."""
         env_copy = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         with patch.dict(os.environ, env_copy, clear=True):
             import src.auth
 
             importlib.reload(src.auth)
             is_valid, status = src.auth.validate_backend_auth("codex")
-            assert is_valid is False
+            assert is_valid is True
 
     def test_validate_codex_backend_with_key(self):
         """validate_backend_auth('codex') passes with OPENAI_API_KEY."""
@@ -647,8 +647,8 @@ class TestGetAllBackendsAuthInfo:
             assert info["claude"]["status"]["valid"] is True
             assert info["codex"]["status"]["valid"] is True
 
-    def test_codex_invalid_when_no_key(self):
-        """Codex shows invalid when OPENAI_API_KEY is missing."""
+    def test_codex_valid_even_without_key(self):
+        """Codex shows valid even when OPENAI_API_KEY is missing (Codex handles own auth)."""
         env_copy = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
         env_copy["CLAUDE_AUTH_METHOD"] = "cli"
         with patch.dict(os.environ, env_copy, clear=True):
@@ -657,7 +657,7 @@ class TestGetAllBackendsAuthInfo:
             importlib.reload(src.auth)
             info = src.auth.get_all_backends_auth_info()
             assert info["claude"]["status"]["valid"] is True
-            assert info["codex"]["status"]["valid"] is False
+            assert info["codex"]["status"]["valid"] is True
 
 
 # Reset module state after tests

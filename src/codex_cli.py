@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from src.constants import (
-    CODEX_APPROVAL_MODE,
     CODEX_CLI_PATH,
     CODEX_CONFIG_ISOLATION,
     CODEX_TIMEOUT_MS,
@@ -55,12 +54,54 @@ def _extract_text_from_item(item: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _strip_collab_json(text: str) -> str:
+    """Remove embedded collab_tool_call JSON blocks from Codex agent_message text.
+
+    Codex's collaborative agent feature embeds raw JSON objects like
+    ``{"id": "...", "type": "collab_tool_call", ...}`` inline in assistant
+    text.  These are internal orchestration data and should not be shown
+    to end users.  Uses brace-counting to handle arbitrarily nested objects.
+    """
+    import re
+
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        # Look for a potential collab JSON block start
+        if text[i] == "{":
+            # Find the matching closing brace via depth counting
+            depth = 0
+            j = i
+            while j < len(text):
+                if text[j] == "{":
+                    depth += 1
+                elif text[j] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            block = text[i : j + 1] if j < len(text) else text[i:]
+            if "collab_tool_call" in block:
+                # Skip this block entirely
+                i = j + 1
+                continue
+        result.append(text[i])
+        i += 1
+
+    cleaned = "".join(result)
+    # Collapse multiple blank lines left by removal
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def _build_content_blocks(item: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a Codex item into internal content blocks."""
     item_type = item.get("type")
 
     if item_type == "agent_message":
-        text = item.get("text", "")
+        text = _strip_collab_json(item.get("text", ""))
+        if not text:
+            return []
         return [{"type": "text", "text": text}]
 
     if item_type == "reasoning":
@@ -250,7 +291,7 @@ class CodexCLI:
         # reads from os.environ at call time.  This prevents a race where
         # a concurrent Claude request's _sdk_env() temporarily removes
         # OPENAI_API_KEY from os.environ.
-        self._api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+        self._api_key: Optional[str] = os.getenv("OPENAI_API_KEY") or None
 
     # ------------------------------------------------------------------
     # Binary discovery
@@ -290,10 +331,13 @@ class CodexCLI:
         """
         env = os.environ.copy()
 
-        # Auth: always use the init-time captured key to avoid race
-        # conditions with Claude's _sdk_env() removing it from os.environ.
+        # Auth: use the init-time captured key if available, otherwise
+        # remove any empty OPENAI_API_KEY so Codex CLI uses its own auth
+        # (e.g. codex login).
         if self._api_key:
             env["OPENAI_API_KEY"] = self._api_key
+        else:
+            env.pop("OPENAI_API_KEY", None)
 
         # Prevent Claude auth token from leaking into Codex subprocess
         env.pop("ANTHROPIC_AUTH_TOKEN", None)
@@ -338,9 +382,8 @@ class CodexCLI:
         if system_prompt:
             cmd.extend(["-c", f"instructions={json.dumps(system_prompt)}"])
 
-        # Add approval mode
-        if CODEX_APPROVAL_MODE:
-            cmd.extend(["--approval-mode", CODEX_APPROVAL_MODE])
+        # Add approval/sandbox mode
+        cmd.append("--full-auto")
 
         env = self._build_env()
 
@@ -536,7 +579,7 @@ class CodexCLI:
                     result_text = result
 
         if result_text is not None:
-            return result_text
+            return _strip_collab_json(result_text) or None
 
         # Second pass: collect text from assistant content blocks
         all_parts: List[str] = []
