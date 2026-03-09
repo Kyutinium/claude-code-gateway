@@ -91,14 +91,20 @@ def _extract_text_and_collab(text: str) -> tuple[str, list[Dict[str, Any]]]:
                             break
                 j += 1
             block = text[i : j + 1] if j < len(text) else text[i:]
-            if "collab_tool_call" in block:
-                try:
-                    parsed = json.loads(block)
+            try:
+                parsed = json.loads(block)
+                if isinstance(parsed, dict) and (
+                    "collab_tool_call" in parsed or parsed.get("type") == "collab_tool_call"
+                ):
                     collab_events.append(parsed)
-                except json.JSONDecodeError:
-                    plain_parts.append(block)
-                i = j + 1
-                continue
+                    i = j + 1
+                    continue
+            except json.JSONDecodeError:
+                pass
+            # Non-collab JSON block or invalid JSON — keep as content
+            plain_parts.append(block)
+            i = j + 1
+            continue
         plain_parts.append(text[i])
         i += 1
 
@@ -107,7 +113,20 @@ def _extract_text_and_collab(text: str) -> tuple[str, list[Dict[str, Any]]]:
     return cleaned.strip(), collab_events
 
 
-def _collab_to_tool_blocks(collab_events: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+def _unwrap_collab_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Unwrap ``{"collab_tool_call": {...}}`` wrapper to get the inner event.
+
+    If the event is already in flat form (has a ``"tool"`` key), return as-is.
+    """
+    if "collab_tool_call" in event and isinstance(event["collab_tool_call"], dict):
+        return event["collab_tool_call"]
+    return event
+
+
+def _collab_to_tool_blocks(
+    collab_events: list[Dict[str, Any]],
+    agent_tool_ids: Optional[Dict[str, str]] = None,
+) -> list[Dict[str, Any]]:
     """Convert collab_tool_call events into tool_use / tool_result content blocks.
 
     Mapping:
@@ -115,12 +134,18 @@ def _collab_to_tool_blocks(collab_events: list[Dict[str, Any]]) -> list[Dict[str
     - send_input   → tool_use (name="Agent")
     - wait (with completed agent message) → tool_result
     - close_agent  → skip (cleanup only)
+
+    *agent_tool_ids* is an optional mapping of receiver_thread_id → tool_use_id
+    that persists across calls, allowing spawn → wait correlation.  When ``None``
+    a local dict is created (single-call scope).
     """
     blocks: list[Dict[str, Any]] = []
     # Track spawn tool_use_ids so wait results can reference them
-    agent_tool_ids: Dict[str, str] = {}  # receiver_thread_id → tool_use_id
+    if agent_tool_ids is None:
+        agent_tool_ids = {}  # receiver_thread_id → tool_use_id
 
-    for event in collab_events:
+    for raw_event in collab_events:
+        event = _unwrap_collab_event(raw_event)
         tool = event.get("tool", "")
         agents_states = event.get("agents_states", {})
 
@@ -489,7 +514,21 @@ class CodexCLI:
 
         env = self._build_env()
 
-        logger.debug("Spawning Codex: %s", " ".join(cmd))
+        # Redact system prompt instructions from debug log to avoid leaking
+        # sensitive system prompt content.
+        redacted_cmd = []
+        skip_next = False
+        for k, part in enumerate(cmd):
+            if skip_next:
+                skip_next = False
+                continue
+            if part == "-c" and k + 1 < len(cmd) and cmd[k + 1].startswith("instructions="):
+                redacted_cmd.append("-c")
+                redacted_cmd.append("instructions=<REDACTED>")
+                skip_next = True
+            else:
+                redacted_cmd.append(part)
+        logger.debug("Spawning Codex: %s", " ".join(redacted_cmd))
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,

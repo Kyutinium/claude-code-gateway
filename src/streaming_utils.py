@@ -131,14 +131,16 @@ def strip_collab_json(text: str) -> str:
                             break
                 j += 1
             block = text[i : j + 1] if j < len(text) else text[i:]
-            if "collab_tool_call" in block:
-                try:
-                    json.loads(block)
+            try:
+                parsed = json.loads(block)
+                if isinstance(parsed, dict) and (
+                    "collab_tool_call" in parsed or parsed.get("type") == "collab_tool_call"
+                ):
                     # Valid collab JSON — strip it
                     i = j + 1
                     continue
-                except json.JSONDecodeError:
-                    pass
+            except json.JSONDecodeError:
+                pass
             plain_parts.append(block)
             i = j + 1
             continue
@@ -158,8 +160,8 @@ class CollabJsonStreamFilter:
     JSON object.  Non-collab content is flushed with minimal delay.
     """
 
-    _COLLAB_MARKER = '"collab_tool_call"'
-    _MARKER_CHECK_LEN = 25  # enough to see {"collab_tool_call"
+    _COLLAB_MARKERS = ('"collab_tool_call"', '"collab_tool"')
+    _MARKER_CHECK_LEN = 50  # enough to see {"collab_tool_call": with whitespace/reordering
     _MAX_BUFFER = 8192
 
     def __init__(self):
@@ -191,21 +193,24 @@ class CollabJsonStreamFilter:
                     elif ch == "}":
                         self._depth -= 1
                         if self._depth == 0:
-                            if self._COLLAB_MARKER in self._buf:
+                            if any(m in self._buf for m in self._COLLAB_MARKERS):
                                 try:
-                                    json.loads(self._buf)
-                                    # Valid collab — drop it
-                                    self._reset()
-                                    continue
+                                    parsed = json.loads(self._buf)
+                                    if isinstance(parsed, dict) and (
+                                        "collab_tool_call" in parsed
+                                        or parsed.get("type") == "collab_tool_call"
+                                    ):
+                                        # Valid collab — drop it
+                                        self._reset()
+                                        continue
                                 except json.JSONDecodeError:
                                     pass
                             output.append(self._buf)
                             self._reset()
                             continue
                 # Not-collab early bail after enough chars
-                if (
-                    len(self._buf) > self._MARKER_CHECK_LEN
-                    and self._COLLAB_MARKER not in self._buf
+                if len(self._buf) > self._MARKER_CHECK_LEN and not any(
+                    m in self._buf for m in self._COLLAB_MARKERS
                 ):
                     output.append(self._buf)
                     self._reset()
@@ -479,7 +484,33 @@ def extract_embedded_tool_blocks(chunk: Dict[str, Any]) -> list:
     if not isinstance(content, list):
         return []
     tool_blocks, _ = _extract_tool_blocks(content)
-    return tool_blocks
+    # Normalize SDK objects (ToolUseBlock, ToolResultBlock) to plain dicts
+    # so callers can safely use .get() on every returned block.
+    normalized: list[Dict[str, Any]] = []
+    for tb in tool_blocks:
+        if isinstance(tb, dict):
+            normalized.append(tb)
+        elif isinstance(tb, ToolUseBlock):
+            normalized.append(
+                {
+                    "type": "tool_use",
+                    "id": getattr(tb, "id", ""),
+                    "name": getattr(tb, "name", ""),
+                    "input": getattr(tb, "input", {}),
+                }
+            )
+        elif isinstance(tb, ToolResultBlock):
+            normalized.append(_normalize_tool_result(tb))
+        elif hasattr(tb, "type"):
+            # Generic SDK object fallback
+            d: Dict[str, Any] = {"type": getattr(tb, "type", "")}
+            for attr in ("id", "name", "input", "tool_use_id", "content", "is_error"):
+                if hasattr(tb, attr):
+                    d[attr] = getattr(tb, attr)
+            normalized.append(d)
+        else:
+            normalized.append(tb)
+    return normalized
 
 
 # ---------------------------------------------------------------------------

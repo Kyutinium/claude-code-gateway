@@ -467,8 +467,7 @@ def _resolve_and_get_backend(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Codex backend is not available. "
-                    f"Install Codex CLI to use model '{model}'."
+                    f"Codex backend is not available. Install Codex CLI to use model '{model}'."
                 ),
             )
         raise HTTPException(
@@ -530,6 +529,12 @@ def _build_backend_options(
     else:
         # Non-Claude backends: basic permission mode
         options["permission_mode"] = PERMISSION_MODE_BYPASS
+        if not request.enable_tools:
+            logger.warning(
+                "enable_tools=false requested for %s backend, but Codex always runs "
+                "in --full-auto mode. Tool restrictions cannot be enforced.",
+                resolved.backend,
+            )
 
     return options
 
@@ -1502,7 +1507,9 @@ async def create_response(
     resolved, backend = _resolve_and_get_backend(body.model)
     logger.info(
         "Responses API: model=%s → backend=%s (provider_model=%s)",
-        body.model, resolved.backend, resolved.provider_model,
+        body.model,
+        resolved.backend,
+        resolved.provider_model,
     )
     _validate_backend_auth(resolved.backend)
 
