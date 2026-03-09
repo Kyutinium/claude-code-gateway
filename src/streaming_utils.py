@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -66,26 +67,172 @@ def extract_stop_reason(messages: list) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_tool_blocks(content) -> tuple[list, list]:
+    """Separate tool_use/tool_result blocks from other content.
+
+    Returns (tool_blocks, non_tool_content).
+    tool_blocks: list of tool_use and tool_result dicts/objects
+    non_tool_content: remaining content blocks (text, thinking, etc.)
+    """
+    if not isinstance(content, list):
+        return [], content if content else []
+    tool_blocks = []
+    non_tool = []
+    for b in content:
+        if isinstance(b, (ToolUseBlock, ToolResultBlock)):
+            tool_blocks.append(b)
+        elif isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result"):
+            tool_blocks.append(b)
+        elif hasattr(b, "type") and getattr(b, "type", None) in ("tool_use", "tool_result"):
+            tool_blocks.append(b)
+        else:
+            non_tool.append(b)
+    return tool_blocks, non_tool
+
+
 def _filter_tool_blocks(content):
     """Filter out tool_use and tool_result blocks from a content list.
 
     Only filters by block type (dict or SDK object). Text blocks are never
     filtered to avoid suppressing legitimate user-visible content.
     """
-    if not isinstance(content, list):
-        return content
-    filtered = []
-    for b in content:
-        # Filter SDK Pydantic objects directly
-        if isinstance(b, (ToolUseBlock, ToolResultBlock)):
+    _, non_tool = _extract_tool_blocks(content)
+    return non_tool or None
+
+
+def strip_collab_json(text: str) -> str:
+    """Remove collab_tool_call JSON blocks from text content.
+
+    Uses a string-aware brace counter identical to the one in codex_cli so
+    that braces inside JSON string values are not misinterpreted.
+    """
+    plain_parts: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth = 0
+            j = i
+            in_string = False
+            escape_next = False
+            while j < len(text):
+                ch = text[j]
+                if escape_next:
+                    escape_next = False
+                elif ch == "\\" and in_string:
+                    escape_next = True
+                elif ch == '"':
+                    in_string = not in_string
+                elif not in_string:
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                j += 1
+            block = text[i : j + 1] if j < len(text) else text[i:]
+            try:
+                parsed = json.loads(block)
+                if isinstance(parsed, dict) and (
+                    "collab_tool_call" in parsed or parsed.get("type") == "collab_tool_call"
+                ):
+                    # Valid collab JSON — strip it
+                    i = j + 1
+                    continue
+            except json.JSONDecodeError:
+                pass
+            plain_parts.append(block)
+            i = j + 1
             continue
-        # Filter dict blocks by type
-        if isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result"):
-            continue
-        if hasattr(b, "type") and getattr(b, "type", None) in ("tool_use", "tool_result"):
-            continue
-        filtered.append(b)
-    return filtered or None
+        plain_parts.append(text[i])
+        i += 1
+    cleaned = "".join(plain_parts)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+class CollabJsonStreamFilter:
+    """Streaming filter that strips collab_tool_call JSON from text deltas.
+
+    Token-level streaming delivers text character by character across many
+    deltas.  When a ``{`` is encountered, this filter buffers subsequent
+    characters until it can determine whether the block is a collab_tool_call
+    JSON object.  Non-collab content is flushed with minimal delay.
+    """
+
+    _COLLAB_MARKERS = ('"collab_tool_call"', '"collab_tool"')
+    _MAX_BUFFER = 8192
+
+    def __init__(self):
+        self._buf = ""
+        self._depth = 0
+        self._in_string = False
+        self._escape_next = False
+
+    @property
+    def buffering(self) -> bool:
+        return bool(self._buf)
+
+    def feed(self, text: str) -> str:
+        """Process a text delta, returning cleaned text (collab JSON removed)."""
+        output: list[str] = []
+
+        for ch in text:
+            if self._buf:
+                self._buf += ch
+                if self._escape_next:
+                    self._escape_next = False
+                elif ch == "\\" and self._in_string:
+                    self._escape_next = True
+                elif ch == '"':
+                    self._in_string = not self._in_string
+                elif not self._in_string:
+                    if ch == "{":
+                        self._depth += 1
+                    elif ch == "}":
+                        self._depth -= 1
+                        if self._depth == 0:
+                            if any(m in self._buf for m in self._COLLAB_MARKERS):
+                                try:
+                                    parsed = json.loads(self._buf)
+                                    if isinstance(parsed, dict) and (
+                                        "collab_tool_call" in parsed
+                                        or parsed.get("type") == "collab_tool_call"
+                                    ):
+                                        # Valid collab — drop it
+                                        self._reset()
+                                        continue
+                                except json.JSONDecodeError:
+                                    pass
+                            output.append(self._buf)
+                            self._reset()
+                            continue
+                # Safety limit: flush if buffer grows unreasonably large
+                if len(self._buf) > self._MAX_BUFFER:
+                    output.append(self._buf)
+                    self._reset()
+            else:
+                if ch == "{":
+                    self._buf = ch
+                    self._depth = 1
+                    self._in_string = False
+                    self._escape_next = False
+                else:
+                    output.append(ch)
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        """Return any remaining buffered text at stream end."""
+        result = self._buf
+        self._reset()
+        return result
+
+    def _reset(self):
+        self._buf = ""
+        self._depth = 0
+        self._in_string = False
+        self._escape_next = False
 
 
 def process_chunk_content(chunk: Dict[str, Any], content_sent: bool = False):
@@ -272,7 +419,12 @@ def _normalize_tool_result(result_block) -> Dict[str, Any]:
             "content": result_block.get("content", ""),
             "is_error": bool(result_block.get("is_error", False)),
         }
-    return {"type": "tool_result", "tool_use_id": "", "content": str(result_block), "is_error": False}
+    return {
+        "type": "tool_result",
+        "tool_use_id": "",
+        "content": str(result_block),
+        "is_error": False,
+    }
 
 
 def make_tool_result_response_sse(
@@ -306,6 +458,55 @@ def is_assistant_content_chunk(chunk: Dict[str, Any]) -> bool:
     return isinstance(chunk.get("content"), list)
 
 
+def extract_embedded_tool_blocks(chunk: Dict[str, Any]) -> list:
+    """Extract tool_use/tool_result blocks embedded in assistant content.
+
+    Codex yields ``{"type": "assistant", "content": [...]}`` with tool_use
+    and tool_result dicts inline (from collab_tool_call conversion).  Claude's
+    SDK sends these as separate stream_event / user chunks.  This function
+    lets the streaming loop emit them as structured SSE events regardless
+    of which backend produced them.
+
+    Returns a (possibly empty) list of tool block dicts.
+    """
+    if not is_assistant_content_chunk(chunk):
+        return []
+    content = chunk.get("content")
+    if content is None:
+        msg = chunk.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return []
+    tool_blocks, _ = _extract_tool_blocks(content)
+    # Normalize SDK objects (ToolUseBlock, ToolResultBlock) to plain dicts
+    # so callers can safely use .get() on every returned block.
+    normalized: list[Dict[str, Any]] = []
+    for tb in tool_blocks:
+        if isinstance(tb, dict):
+            normalized.append(tb)
+        elif isinstance(tb, ToolUseBlock):
+            normalized.append(
+                {
+                    "type": "tool_use",
+                    "id": getattr(tb, "id", ""),
+                    "name": getattr(tb, "name", ""),
+                    "input": getattr(tb, "input", {}),
+                }
+            )
+        elif isinstance(tb, ToolResultBlock):
+            normalized.append(_normalize_tool_result(tb))
+        elif hasattr(tb, "type"):
+            # Generic SDK object fallback
+            d: Dict[str, Any] = {"type": getattr(tb, "type", "")}
+            for attr in ("id", "name", "input", "tool_use_id", "content", "is_error"):
+                if hasattr(tb, attr):
+                    d[attr] = getattr(tb, attr)
+            normalized.append(d)
+        else:
+            normalized.append(tb)
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Shared streaming helpers
 # ---------------------------------------------------------------------------
@@ -322,9 +523,7 @@ class ToolUseAccumulator:
     def __init__(self):
         self._acc: Dict[tuple, Dict[str, Any]] = {}
 
-    def process_stream_event(
-        self, chunk: Dict[str, Any]
-    ) -> tuple[bool, Optional[Dict[str, Any]]]:
+    def process_stream_event(self, chunk: Dict[str, Any]) -> tuple[bool, Optional[Dict[str, Any]]]:
         """Process a stream_event chunk for tool_use accumulation.
 
         Returns (handled, completed_tool_block):
@@ -422,6 +621,7 @@ def extract_user_tool_results(chunk: Dict[str, Any]) -> tuple[list, Optional[str
 def format_chunk_content(chunk: Dict[str, Any], content_sent: bool) -> Optional[str]:
     """Extract content from a chunk and format as a single text string.
 
+    Strips any embedded collab_tool_call JSON before returning.
     Returns non-empty, non-whitespace text or None.
     """
     content = process_chunk_content(chunk, content_sent=content_sent)
@@ -430,9 +630,11 @@ def format_chunk_content(chunk: Dict[str, Any], content_sent: bool) -> Optional[
     if isinstance(content, list):
         formatted = MessageAdapter.format_blocks(content)
         if formatted and not formatted.isspace():
-            return formatted
+            formatted = strip_collab_json(formatted)
+            return formatted if formatted else None
     elif isinstance(content, str) and content and not content.isspace():
-        return content
+        content = strip_collab_json(content)
+        return content if content else None
     return None
 
 
@@ -454,6 +656,7 @@ async def stream_chunks(
     token_streaming = False
     in_thinking = False
     tool_acc = ToolUseAccumulator()
+    collab_filter = CollabJsonStreamFilter()
 
     def _emit_sse(text: str):
         nonlocal role_sent
@@ -486,9 +689,11 @@ async def stream_chunks(
         if text_delta is not None:
             token_streaming = True
             if text_delta:
-                for sse in _emit_sse(text_delta):
-                    yield sse
-                content_sent = True
+                cleaned = collab_filter.feed(text_delta)
+                if cleaned:
+                    for sse in _emit_sse(cleaned):
+                        yield sse
+                    content_sent = True
             elif not role_sent:
                 yield make_sse(request_id, request.model, {"role": "assistant", "content": ""})
                 role_sent = True
@@ -519,6 +724,16 @@ async def stream_chunks(
             chunks_buffer.append(chunk)
             continue
 
+        # Emit tool_use/tool_result blocks embedded in assistant content
+        # (Codex collab_tool_call → tool blocks arrive here, not via stream_event)
+        embedded_tools = extract_embedded_tool_blocks(chunk)
+        for tb in embedded_tools:
+            if tb.get("type") == "tool_use":
+                yield make_task_sse(request_id, request.model, tb)
+            elif tb.get("type") == "tool_result":
+                result_data = _normalize_tool_result(tb)
+                yield make_task_sse(request_id, request.model, result_data)
+
         # Content chunks (assistant messages, results)
         chunks_buffer.append(chunk)
         text = format_chunk_content(chunk, content_sent)
@@ -526,6 +741,13 @@ async def stream_chunks(
             for sse in _emit_sse(text):
                 yield sse
             content_sent = True
+
+    # Flush any remaining buffered text from the collab filter
+    remaining = collab_filter.flush()
+    if remaining:
+        for sse in _emit_sse(remaining):
+            yield sse
+        content_sent = True
 
     if tool_acc.has_incomplete:
         logger.warning("Incomplete tool_use blocks at stream end: %s", tool_acc.incomplete_keys)
@@ -577,6 +799,7 @@ async def stream_response_chunks(
     token_streaming = False
     in_thinking = False
     tool_acc = ToolUseAccumulator()
+    collab_filter = CollabJsonStreamFilter()
     full_text = []
     seq = 0
     _metadata = metadata or {}
@@ -684,9 +907,11 @@ async def stream_response_chunks(
                 if was_thinking or in_thinking or text_delta in ("<think>", "</think>"):
                     continue
                 if text_delta:
-                    yield _emit_delta(text_delta)
-                    full_text.append(text_delta)
-                    content_sent = True
+                    cleaned = collab_filter.feed(text_delta)
+                    if cleaned:
+                        yield _emit_delta(cleaned)
+                        full_text.append(cleaned)
+                        content_sent = True
                 continue
 
             # Accumulate tool_use blocks from stream events
@@ -719,6 +944,23 @@ async def stream_response_chunks(
                 chunks_buffer.append(chunk)
                 continue
 
+            # Emit tool_use/tool_result blocks embedded in assistant content
+            # (Codex collab_tool_call → tool blocks arrive here, not via stream_event)
+            embedded_tools = extract_embedded_tool_blocks(chunk)
+            for tb in embedded_tools:
+                if tb.get("type") == "tool_use":
+                    yield make_tool_use_response_sse(
+                        tb,
+                        sequence_number=_next_seq(),
+                        parent_tool_use_id=tb.get("parent_tool_use_id"),
+                    )
+                elif tb.get("type") == "tool_result":
+                    yield make_tool_result_response_sse(
+                        tb,
+                        sequence_number=_next_seq(),
+                        parent_tool_use_id=tb.get("parent_tool_use_id"),
+                    )
+
             # Content chunks (assistant messages, results)
             chunks_buffer.append(chunk)
             text = format_chunk_content(chunk, content_sent)
@@ -732,6 +974,13 @@ async def stream_response_chunks(
         stream_result["success"] = False
         yield _make_failed_event("server_error", "Internal server error")
         return
+
+    # Flush any remaining buffered text from the collab filter
+    remaining = collab_filter.flush()
+    if remaining:
+        yield _emit_delta(remaining)
+        full_text.append(remaining)
+        content_sent = True
 
     if tool_acc.has_incomplete:
         logger.warning("Incomplete tool_use blocks at stream end: %s", tool_acc.incomplete_keys)
@@ -807,6 +1056,7 @@ async def stream_response_chunks(
         metadata=_metadata,
     )
     stream_result["success"] = True
+    stream_result["assistant_text"] = final_text
     yield make_response_sse(
         "response.completed", response_obj=final_resp, sequence_number=_next_seq()
     )

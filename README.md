@@ -178,6 +178,20 @@ The pipe uses `/v1/responses` with `previous_response_id` chaining, maintaining 
 
 Streaming (`"stream": true`) is supported on `/v1/chat/completions`, `/v1/messages`, and `/v1/responses`.
 
+### Responses API Deviations
+
+The `/v1/responses` endpoint intentionally deviates from the OpenAI Responses API in the following ways:
+
+| Behavior | This Gateway | OpenAI API |
+|----------|-------------|------------|
+| `instructions` + `previous_response_id` | Returns **400** — system prompt cannot change mid-session | Allowed (prior instructions don't carry over) |
+| Stale `previous_response_id` | Returns **409** with the latest valid response ID for client recovery | May allow branching from earlier IDs |
+| Backend mismatch in session | Returns **400** — mixing Claude/Codex models within a session is not supported | N/A |
+| Codex resume without thread_id | Returns **409** — previous turn must have returned a thread_id to continue | N/A |
+| Failure-path `provider_session_id` | Captured internally but not externally recoverable — no `response_id` is committed on failed turns | N/A |
+
+**Stale ID recovery:** When a `409` is returned for a stale `previous_response_id`, the error message includes the current latest response ID (e.g., `resp_{session_id}_{turn}`), allowing clients to retry with the correct value.
+
 ## Docker
 
 ```bash

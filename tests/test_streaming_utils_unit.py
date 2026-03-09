@@ -11,7 +11,9 @@ import pytest
 from src.models import ChatCompletionRequest, Message
 from src.response_models import OutputItem, ResponseObject
 from src.streaming_utils import (
+    CollabJsonStreamFilter,
     ToolUseAccumulator,
+    extract_embedded_tool_blocks,
     extract_sdk_usage,
     extract_user_tool_results,
     format_chunk_content,
@@ -20,6 +22,7 @@ from src.streaming_utils import (
     map_stop_reason,
     stream_chunks,
     stream_response_chunks,
+    strip_collab_json,
 )
 
 
@@ -100,7 +103,9 @@ async def test_stream_chunks_formats_tool_results_from_legacy_user_messages():
 
     lines = [
         line
-        async for line in stream_chunks(tool_result_source(), request, "req-tool-result", chunks_buffer, logger)
+        async for line in stream_chunks(
+            tool_result_source(), request, "req-tool-result", chunks_buffer, logger
+        )
     ]
 
     # tool_result is emitted as a system_event; since no real text content was sent,
@@ -335,11 +340,19 @@ async def test_stream_response_chunks_success_suppresses_thinking_and_formats_to
     assert "response.output_item.added" in event_types
     assert "response.content_part.added" in event_types
     assert event_types[-1] == "response.completed"
-    assert event_types.index("response.output_text.done") < event_types.index("response.content_part.done")
-    assert event_types.index("response.content_part.done") < event_types.index("response.output_item.done")
+    assert event_types.index("response.output_text.done") < event_types.index(
+        "response.content_part.done"
+    )
+    assert event_types.index("response.content_part.done") < event_types.index(
+        "response.output_item.done"
+    )
     assert event_types.index("response.output_item.done") < event_types.index("response.completed")
 
-    deltas = [payload["delta"] for event_type, payload in parsed if event_type == "response.output_text.delta"]
+    deltas = [
+        payload["delta"]
+        for event_type, payload in parsed
+        if event_type == "response.output_text.delta"
+    ]
     assert deltas[0] == "Hello"
     assert all("hidden" not in delta for delta in deltas)
     assert all("<think>" not in delta for delta in deltas)
@@ -389,7 +402,9 @@ async def test_stream_response_chunks_formats_legacy_assistant_messages():
     ]
     parsed = [_parse_response_sse(line) for line in lines]
 
-    delta_payloads = [payload for event_type, payload in parsed if event_type == "response.output_text.delta"]
+    delta_payloads = [
+        payload for event_type, payload in parsed if event_type == "response.output_text.delta"
+    ]
     assert delta_payloads[0]["delta"] == "Legacy answer"
     assert parsed[-1][1]["response"]["output"][0]["content"][0]["text"] == "Legacy answer"
     assert stream_result["success"] is True
@@ -592,9 +607,29 @@ async def test_stream_chunks_task_messages_as_structured_json():
     """Task system messages are emitted as structured JSON system_event, not content."""
 
     async def task_only_source():
-        yield {"type": "system", "subtype": "task_started", "task_id": "t1", "description": "Analyzing code", "session_id": "s1"}
-        yield {"type": "system", "subtype": "task_progress", "task_id": "t1", "description": "Reading files", "last_tool_name": "Read", "usage": {"tool_uses": 3}}
-        yield {"type": "system", "subtype": "task_notification", "task_id": "t1", "status": "completed", "summary": "Done", "usage": {"tool_uses": 5}}
+        yield {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "t1",
+            "description": "Analyzing code",
+            "session_id": "s1",
+        }
+        yield {
+            "type": "system",
+            "subtype": "task_progress",
+            "task_id": "t1",
+            "description": "Reading files",
+            "last_tool_name": "Read",
+            "usage": {"tool_uses": 3},
+        }
+        yield {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "t1",
+            "status": "completed",
+            "summary": "Done",
+            "usage": {"tool_uses": 5},
+        }
 
     request = ChatCompletionRequest(
         model="claude-test",
@@ -612,7 +647,7 @@ async def test_stream_chunks_task_messages_as_structured_json():
     task_events = []
     for line in lines:
         if line.startswith("data: ") and "system_event" in line:
-            parsed = json.loads(line[len("data: "):])
+            parsed = json.loads(line[len("data: ") :])
             task_events.append(parsed["system_event"])
 
     assert len(task_events) == 3
@@ -664,8 +699,20 @@ async def test_stream_response_chunks_task_events_as_custom_sse():
     """Task events are emitted as custom SSE event types, not content."""
 
     async def task_only_source():
-        yield {"type": "system", "subtype": "task_started", "task_id": "t1", "description": "Working", "session_id": "s1"}
-        yield {"type": "system", "subtype": "task_notification", "task_id": "t1", "status": "completed", "summary": "Done"}
+        yield {
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "t1",
+            "description": "Working",
+            "session_id": "s1",
+        }
+        yield {
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "t1",
+            "status": "completed",
+            "summary": "Done",
+        }
 
     stream_result = {}
     lines = [
@@ -734,34 +781,40 @@ class TestToolUseAccumulator:
         acc = ToolUseAccumulator()
 
         # content_block_start
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "tool_use", "id": "tool-1", "name": "Read"},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "tool_use", "id": "tool-1", "name": "Read"},
+                },
+            }
+        )
         assert handled is True
         assert result is None
 
         # content_block_delta (input_json_delta)
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "input_json_delta", "partial_json": '{"path":"/tmp/a.txt"}'},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"path":"/tmp/a.txt"}'},
+                },
+            }
+        )
         assert handled is True
         assert result is None
 
         # content_block_stop
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {"type": "content_block_stop", "index": 0},
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {"type": "content_block_stop", "index": 0},
+            }
+        )
         assert handled is True
         assert result is not None
         assert result["name"] == "Read"
@@ -770,46 +823,54 @@ class TestToolUseAccumulator:
 
     def test_tracks_incomplete_blocks(self):
         acc = ToolUseAccumulator()
-        acc.process_stream_event({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "tool_use", "id": "tool-1", "name": "Write"},
-            },
-        })
+        acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "tool_use", "id": "tool-1", "name": "Write"},
+                },
+            }
+        )
         assert acc.has_incomplete is True
         assert len(acc.incomplete_keys) == 1
 
     def test_subagent_text_delta_is_skipped(self):
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "parent_tool_use_id": "parent-1",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "sub-agent output"},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "parent_tool_use_id": "parent-1",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "sub-agent output"},
+                },
+            }
+        )
         assert handled is True
         assert result is None
 
     def test_includes_parent_tool_use_id_when_present(self):
         acc = ToolUseAccumulator()
-        acc.process_stream_event({
-            "type": "stream_event",
-            "parent_tool_use_id": "parent-1",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "tool_use", "id": "tool-1", "name": "Read"},
-            },
-        })
-        _, result = acc.process_stream_event({
-            "type": "stream_event",
-            "parent_tool_use_id": "parent-1",
-            "event": {"type": "content_block_stop", "index": 0},
-        })
+        acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "parent_tool_use_id": "parent-1",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "tool_use", "id": "tool-1", "name": "Read"},
+                },
+            }
+        )
+        _, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "parent_tool_use_id": "parent-1",
+                "event": {"type": "content_block_stop", "index": 0},
+            }
+        )
         assert result["parent_tool_use_id"] == "parent-1"
 
 
@@ -874,3 +935,314 @@ class TestFormatChunkContent:
     def test_returns_none_for_empty_chunk(self):
         chunk = {"type": "metadata"}
         assert format_chunk_content(chunk, content_sent=False) is None
+
+
+# ==================== Embedded tool blocks (Codex collab_tool_call) ====================
+
+
+class TestExtractEmbeddedToolBlocks:
+    def test_extracts_tool_use_and_tool_result_from_assistant_content(self):
+        chunk = {
+            "type": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "Agent", "input": {"prompt": "hi"}},
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done", "is_error": False},
+                {"type": "text", "text": "Final answer"},
+            ],
+        }
+        blocks = extract_embedded_tool_blocks(chunk)
+        assert len(blocks) == 2
+        assert blocks[0]["type"] == "tool_use"
+        assert blocks[1]["type"] == "tool_result"
+
+    def test_returns_empty_for_text_only_content(self):
+        chunk = {
+            "type": "assistant",
+            "content": [{"type": "text", "text": "No tools here"}],
+        }
+        assert extract_embedded_tool_blocks(chunk) == []
+
+    def test_returns_empty_for_non_assistant_chunk(self):
+        chunk = {"type": "system", "subtype": "task_started"}
+        assert extract_embedded_tool_blocks(chunk) == []
+
+    def test_handles_message_wrapper(self):
+        chunk = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}},
+                ]
+            },
+        }
+        blocks = extract_embedded_tool_blocks(chunk)
+        assert len(blocks) == 1
+        assert blocks[0]["name"] == "Bash"
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_emits_embedded_tool_blocks_as_system_events():
+    """Codex-style embedded tool_use/tool_result in assistant content emit as system_event."""
+
+    async def codex_tool_source():
+        yield {
+            "type": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "codex_agent_abc",
+                    "name": "Agent",
+                    "input": {"prompt": "explore"},
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "codex_agent_abc",
+                    "content": "Found 3 files",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "Here are the results."},
+            ],
+        }
+
+    request = ChatCompletionRequest(
+        model="codex",
+        messages=[Message(role="user", content="Check files")],
+        stream=True,
+    )
+    chunks_buffer = []
+    lines = [
+        line
+        async for line in stream_chunks(
+            codex_tool_source(), request, "req-codex-tool", chunks_buffer, logging.getLogger("test")
+        )
+    ]
+
+    # Should have: tool_use system_event, tool_result system_event, role+content SSE
+    system_events = []
+    for line in lines:
+        if line.startswith("data: ") and "system_event" in line:
+            parsed = json.loads(line[len("data: ") :])
+            system_events.append(parsed["system_event"])
+
+    assert len(system_events) == 2
+    assert system_events[0]["type"] == "tool_use"
+    assert system_events[0]["name"] == "Agent"
+    assert system_events[1]["type"] == "tool_result"
+    assert system_events[1]["tool_use_id"] == "codex_agent_abc"
+    assert system_events[1]["content"] == "Found 3 files"
+
+    # Text content should also be emitted
+    all_content = "".join(lines)
+    assert "Here are the results." in all_content
+
+
+@pytest.mark.asyncio
+async def test_stream_response_chunks_emits_embedded_tool_blocks_as_structured_sse():
+    """Codex-style embedded tool blocks emit as response.tool_use/response.tool_result SSE."""
+
+    async def codex_tool_source():
+        yield {
+            "type": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "codex_agent_xyz",
+                    "name": "Agent",
+                    "input": {"prompt": "analyze"},
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "codex_agent_xyz",
+                    "content": "Analysis complete",
+                    "is_error": False,
+                },
+                {"type": "text", "text": "The analysis is done."},
+            ],
+        }
+
+    chunks_buffer = []
+    stream_result = {}
+    lines = [
+        line
+        async for line in stream_response_chunks(
+            chunk_source=codex_tool_source(),
+            model="codex",
+            response_id="resp-codex-tool",
+            output_item_id="msg-codex-tool",
+            chunks_buffer=chunks_buffer,
+            logger=logging.getLogger("test-codex-resp-tool"),
+            stream_result=stream_result,
+        )
+    ]
+    parsed = [_parse_response_sse(line) for line in lines]
+    event_types = [et for et, _ in parsed]
+
+    # Should have structured tool events
+    assert "response.tool_use" in event_types
+    assert "response.tool_result" in event_types
+
+    tool_use_ev = next(p for et, p in parsed if et == "response.tool_use")
+    assert tool_use_ev["name"] == "Agent"
+    assert tool_use_ev["tool_use_id"] == "codex_agent_xyz"
+    assert tool_use_ev["input"] == {"prompt": "analyze"}
+
+    tool_result_ev = next(p for et, p in parsed if et == "response.tool_result")
+    assert tool_result_ev["tool_use_id"] == "codex_agent_xyz"
+    assert tool_result_ev["content"] == "Analysis complete"
+
+    # Text content should also be emitted as delta
+    deltas = [p["delta"] for et, p in parsed if et == "response.output_text.delta"]
+    assert "The analysis is done." in deltas
+
+    assert stream_result["success"] is True
+    assert parsed[-1][0] == "response.completed"
+
+
+# ---------------------------------------------------------------------------
+# strip_collab_json tests
+# ---------------------------------------------------------------------------
+
+
+class TestStripCollabJson:
+    """Tests for the strip_collab_json utility."""
+
+    def test_no_collab_returns_unchanged(self):
+        text = "Hello world. Normal text here."
+        assert strip_collab_json(text) == text
+
+    def test_strips_single_collab_block(self):
+        collab = json.dumps({"collab_tool_call": {"type": "spawn_agent", "prompt": "hi"}})
+        text = f"Before{collab}After"
+        assert strip_collab_json(text) == "BeforeAfter"
+
+    def test_strips_multiple_collab_blocks(self):
+        c1 = json.dumps({"collab_tool_call": {"type": "spawn_agent", "prompt": "a"}})
+        c2 = json.dumps({"collab_tool_call": {"type": "wait", "agents_states": {}}})
+        text = f"Start\n{c1}\nMiddle\n{c2}\nEnd"
+        result = strip_collab_json(text)
+        assert "collab_tool_call" not in result
+        assert "Start" in result
+        assert "Middle" in result
+        assert "End" in result
+
+    def test_preserves_non_collab_json(self):
+        text = 'Use {"key": "value"} in your config.'
+        assert strip_collab_json(text) == text
+
+    def test_handles_braces_in_json_strings(self):
+        collab = json.dumps({
+            "collab_tool_call": {"type": "wait", "agents_states": {"t1": {"message": "Found {3} files"}}}
+        })
+        text = f"Result: {collab} done."
+        result = strip_collab_json(text)
+        assert "collab_tool_call" not in result
+        assert "Result:" in result
+        assert "done." in result
+
+    def test_empty_string(self):
+        assert strip_collab_json("") == ""
+
+
+# ---------------------------------------------------------------------------
+# CollabJsonStreamFilter tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollabJsonStreamFilter:
+    """Tests for the streaming collab JSON filter."""
+
+    def test_plain_text_passes_through(self):
+        f = CollabJsonStreamFilter()
+        assert f.feed("Hello world") == "Hello world"
+        assert f.flush() == ""
+
+    def test_filters_collab_json_in_single_delta(self):
+        collab = json.dumps({"collab_tool_call": {"type": "spawn_agent"}})
+        f = CollabJsonStreamFilter()
+        result = f.feed(f"Before{collab}After")
+        assert "collab_tool_call" not in result
+        assert "Before" in result
+        assert "After" in result
+
+    def test_filters_collab_json_split_across_deltas(self):
+        collab = json.dumps({"collab_tool_call": {"type": "spawn_agent", "prompt": "test"}})
+        f = CollabJsonStreamFilter()
+        output_parts = []
+        # Split the collab JSON across character-by-character deltas
+        full_text = f"Hello {collab} World"
+        for ch in full_text:
+            out = f.feed(ch)
+            if out:
+                output_parts.append(out)
+        remaining = f.flush()
+        if remaining:
+            output_parts.append(remaining)
+        result = "".join(output_parts)
+        assert "collab_tool_call" not in result
+        assert "Hello" in result
+        assert "World" in result
+
+    def test_non_collab_json_passes_through(self):
+        f = CollabJsonStreamFilter()
+        result = f.feed('Use {"key": "val"} here')
+        result += f.flush()
+        assert '{"key": "val"}' in result
+
+    def test_buffering_property(self):
+        f = CollabJsonStreamFilter()
+        assert not f.buffering
+        f.feed("{")
+        assert f.buffering
+        f.flush()
+        assert not f.buffering
+
+    def test_flush_returns_buffered_text(self):
+        f = CollabJsonStreamFilter()
+        f.feed("{incomplete")
+        remaining = f.flush()
+        assert remaining == "{incomplete"
+
+
+# ---------------------------------------------------------------------------
+# stream_response_chunks collab filtering test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_response_chunks_strips_collab_from_token_deltas():
+    """Token-level text deltas containing collab_tool_call JSON should be stripped."""
+    collab = json.dumps({"collab_tool_call": {"type": "spawn_agent", "prompt": "test"}})
+    full_text = f"Hello {collab} World"
+
+    async def source():
+        # Simulate token-level streaming with collab JSON in text deltas
+        for ch in full_text:
+            yield {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": ch},
+                },
+            }
+
+    chunks_buffer = []
+    stream_result = {}
+    lines = [
+        line
+        async for line in stream_response_chunks(
+            chunk_source=source(),
+            model="test-model",
+            response_id="resp-collab-strip",
+            output_item_id="msg-collab-strip",
+            chunks_buffer=chunks_buffer,
+            logger=logging.getLogger("test-collab-strip"),
+            stream_result=stream_result,
+        )
+    ]
+    parsed = [_parse_response_sse(line) for line in lines]
+    deltas = [p.get("delta", "") for et, p in parsed if et == "response.output_text.delta"]
+    combined = "".join(d for d in deltas if isinstance(d, str))
+    assert "collab_tool_call" not in combined
+    assert "Hello" in combined
+    assert "World" in combined
+    assert stream_result["success"] is True
