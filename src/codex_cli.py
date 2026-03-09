@@ -206,8 +206,15 @@ def _strip_collab_json(text: str) -> str:
     return cleaned
 
 
-def _build_content_blocks(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Convert a Codex item into internal content blocks."""
+def _build_content_blocks(
+    item: Dict[str, Any],
+    agent_tool_ids: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Convert a Codex item into internal content blocks.
+
+    *agent_tool_ids* is an optional per-request mapping that persists
+    spawn_agent → wait correlation across separate ``item.completed`` events.
+    """
     item_type = item.get("type")
 
     if item_type == "agent_message":
@@ -216,7 +223,7 @@ def _build_content_blocks(item: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
         # Convert collab events to tool_use/tool_result blocks
         if collab_events:
-            blocks.extend(_collab_to_tool_blocks(collab_events))
+            blocks.extend(_collab_to_tool_blocks(collab_events, agent_tool_ids=agent_tool_ids))
         # Add remaining plain text
         if cleaned_text:
             blocks.append({"type": "text", "text": cleaned_text})
@@ -287,18 +294,24 @@ def _normalize_usage(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def normalize_codex_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def normalize_codex_event(
+    event: Dict[str, Any],
+    agent_tool_ids: Optional[Dict[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
     """Convert a single Codex JSONL event into an internal chunk dict.
 
     Returns ``None`` for events that should not be yielded downstream
     (e.g. ``thread.started`` — the caller handles that separately).
+
+    *agent_tool_ids* is an optional per-request mapping that persists
+    spawn_agent → wait correlation across separate JSONL events.
     """
     event_type = event.get("type", "")
 
     # --- item.completed: the main content-carrying event ---
     if event_type == "item.completed":
         item = event.get("item", {})
-        blocks = _build_content_blocks(item)
+        blocks = _build_content_blocks(item, agent_tool_ids=agent_tool_ids)
         return {"type": "assistant", "content": blocks}
 
     # --- item.started: early signal, useful for tool-progress ---
@@ -368,7 +381,7 @@ def normalize_codex_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # Codex may emit these as standalone JSONL events (not just embedded in
     # agent_message text).  Convert to tool_use/tool_result blocks.
     if event_type == "collab_tool_call":
-        blocks = _collab_to_tool_blocks([event])
+        blocks = _collab_to_tool_blocks([event], agent_tool_ids=agent_tool_ids)
         if blocks:
             return {"type": "assistant", "content": blocks}
         return None
@@ -420,9 +433,6 @@ class CodexCLI:
         # OPENAI_API_KEY from os.environ.
         self._api_key: Optional[str] = os.getenv("OPENAI_API_KEY") or None
 
-        # Persistent collab agent ID mapping for spawn_agent → wait correlation
-        # across separate JSONL events within a single run_completion() call.
-        self._collab_agent_ids: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Binary discovery
@@ -617,9 +627,9 @@ class CodexCLI:
         """
         thread_id_for_resume = resume  # Codex thread_id if resuming
         captured_thread_id: Optional[str] = None
-        # Reset per-turn collab agent ID tracking so spawn→wait correlation
-        # is scoped to this completion but persists across JSONL events.
-        self._collab_agent_ids = {}
+        # Per-request collab agent ID tracking for spawn→wait correlation.
+        # Local variable ensures concurrent requests never cross-wire.
+        collab_agent_ids: Dict[str, str] = {}
 
         try:
             async with self._spawn_codex(
@@ -656,17 +666,20 @@ class CodexCLI:
                         continue  # Don't yield to downstream as normal content
 
                     # Handle collab_tool_call events inline with the
-                    # instance-level agent ID dict so spawn→wait correlation
-                    # persists across separate JSONL events.
+                    # per-request agent ID dict so spawn→wait correlation
+                    # persists across separate JSONL events without
+                    # cross-wiring concurrent requests.
                     if event.get("type") == "collab_tool_call":
                         blocks = _collab_to_tool_blocks(
-                            [event], agent_tool_ids=self._collab_agent_ids
+                            [event], agent_tool_ids=collab_agent_ids
                         )
                         if blocks:
                             yield {"type": "assistant", "content": blocks}
                         continue
 
-                    normalized = normalize_codex_event(event)
+                    normalized = normalize_codex_event(
+                        event, agent_tool_ids=collab_agent_ids
+                    )
                     if normalized is not None:
                         yield normalized
 
