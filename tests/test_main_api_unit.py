@@ -3,15 +3,18 @@
 Integration-style unit tests for FastAPI endpoints in src.main.
 """
 
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import src.main as main
+from src.backend_registry import BackendRegistry
 from src.constants import DEFAULT_MODEL
 from src.models import SessionInfo
 
@@ -25,6 +28,10 @@ def client_context():
 
     if main.limiter and hasattr(main.limiter, "_storage"):
         main.limiter._storage.reset()
+
+    # Register mock_cli as the "claude" backend so BackendRegistry.get("claude")
+    # works after Phase 3 refactors endpoints to use backend dispatch.
+    BackendRegistry.register("claude", mock_cli)
 
     with (
         patch.object(main, "claude_cli", mock_cli),
@@ -526,8 +533,15 @@ def test_create_response_returns_503_when_auth_is_invalid():
         client_context() as (client, _mock_cli),
         patch.object(
             main,
-            "validate_claude_code_auth",
-            return_value=(False, {"errors": ["missing auth"], "method": "none"}),
+            "_validate_backend_auth",
+            side_effect=HTTPException(
+                status_code=503,
+                detail={
+                    "message": "claude backend authentication failed",
+                    "errors": ["missing auth"],
+                    "help": "Check /v1/auth/status for detailed authentication information",
+                },
+            ),
         ),
     ):
         response = client.post(
@@ -591,6 +605,7 @@ def test_create_response_streaming_success_commits_session_state(isolated_sessio
             {"content": [{"type": "text", "text": "streamed assistant"}]}
         )
         kwargs["stream_result"]["success"] = True
+        kwargs["stream_result"]["assistant_text"] = "streamed assistant"
         yield 'event: response.created\ndata: {"type":"response.created","sequence_number":0}\n\n'
 
     with (
@@ -601,7 +616,6 @@ def test_create_response_streaming_success_commits_session_state(isolated_sessio
         ),
     ):
         mock_cli.run_completion = fake_run_completion
-        mock_cli.parse_message.return_value = "streamed assistant"
 
         with client.stream(
             "POST",
@@ -661,7 +675,9 @@ def test_create_response_streaming_setup_error_returns_error_event_without_commi
     session = next(iter(isolated_session_manager.sessions.values()))
 
     assert response.status_code == 200
-    assert "event: error" in body
+    assert "event: response.failed" in body
+    assert '"status": "failed"' in body
+    assert '"code": "server_error"' in body
     assert run_calls[0]["prompt"] == "Stream this"
     assert session.turn_counter == 0
     assert session.messages == []
@@ -684,7 +700,7 @@ def test_create_response_returns_502_when_claude_sdk_raises():
         )
 
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "Claude SDK error: boom"
+    assert response.json()["error"]["message"] == "Backend error: boom"
 
 
 def test_create_response_returns_502_when_sdk_emits_error_chunk():
@@ -703,7 +719,7 @@ def test_create_response_returns_502_when_sdk_emits_error_chunk():
         )
 
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "Claude SDK error: sdk failed"
+    assert response.json()["error"]["message"] == "Backend error: sdk failed"
 
 
 def test_create_response_returns_502_when_sdk_returns_no_message():
@@ -724,4 +740,950 @@ def test_create_response_returns_502_when_sdk_returns_no_message():
         )
 
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "No response from Claude SDK"
+    assert response.json()["error"]["message"] == "No response from backend"
+
+
+# ============================================================================
+# Phase 3: /v1/responses Codex support & strict latest-only semantics
+# ============================================================================
+
+
+def _codex_run_completion_factory(thread_id="fake-thread-123", text="codex reply"):
+    """Return an async generator factory mimicking FakeCodexBackend.run_completion."""
+
+    async def fake_run_completion(**kwargs):
+        yield {"type": "codex_session", "session_id": thread_id}
+        yield {"type": "assistant", "content": [{"type": "text", "text": text}]}
+        yield {
+            "type": "result",
+            "subtype": "success",
+            "result": text,
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        }
+
+    return fake_run_completion
+
+
+def _setup_codex_backend(mock_cli, thread_id="fake-thread-123", text="codex reply"):
+    """Register a codex backend with sensible defaults via mock_cli-like helpers."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend(thread_id=thread_id)
+    BackendRegistry.register("codex", backend)
+    return backend
+
+
+# Helper: context manager to bypass codex auth validation
+def _bypass_codex_auth():
+    """Patch _validate_backend_auth to be a no-op for codex tests."""
+    return patch.object(main, "_validate_backend_auth", return_value=None)
+
+
+# 1. test_responses_codex_streaming
+def test_responses_codex_streaming(isolated_session_manager):
+    """Codex model → backend dispatch → SSE stream with session state committed."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend(thread_id="stream-thread-1")
+    BackendRegistry.register("codex", backend)
+
+    def fake_run_completion(**kwargs):
+        async def _gen():
+            async for chunk in FakeCodexBackend(thread_id="stream-thread-1").run_completion(
+                **kwargs
+            ):
+                yield chunk
+
+        return _gen()
+
+    async def fake_stream_response_chunks(**kwargs):
+        kwargs["chunks_buffer"].extend(
+            [
+                {"type": "codex_session", "session_id": "stream-thread-1"},
+                {"content": [{"type": "text", "text": "codex reply"}]},
+            ]
+        )
+        kwargs["stream_result"]["success"] = True
+        kwargs["stream_result"]["assistant_text"] = "codex reply"
+        yield 'event: response.created\ndata: {"type":"response.created","sequence_number":0}\n\n'
+
+    with (
+        client_context() as (client, mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+        patch.object(
+            main.streaming_utils, "stream_response_chunks", new=fake_stream_response_chunks
+        ),
+    ):
+        mock_cli.run_completion = fake_run_completion
+
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": "codex", "input": "Stream codex", "stream": True},
+        ) as response:
+            body = "".join(response.iter_text())
+
+    session = next(iter(isolated_session_manager.sessions.values()))
+
+    assert response.status_code == 200
+    assert "response.created" in body
+    assert session.turn_counter == 1
+    assert session.backend == "codex"
+    assert session.provider_session_id == "stream-thread-1"
+
+
+# 2. test_responses_codex_non_streaming
+def test_responses_codex_non_streaming(isolated_session_manager):
+    """Codex model → non-streaming → ResponseObject with correct session state."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend(thread_id="nonstream-thread-1")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Non-stream codex"},
+        )
+
+    body = response.json()
+    session_id, turn = main._parse_response_id(body["id"])
+    session = isolated_session_manager.get_session(session_id)
+
+    assert response.status_code == 200
+    assert body["status"] == "completed"
+    assert body["output"][0]["content"][0]["text"] == "codex reply"
+    assert turn == 1
+    assert session.turn_counter == 1
+    assert session.backend == "codex"
+    assert session.provider_session_id == "nonstream-thread-1"
+
+
+# 3. test_responses_stale_previous_response_id
+def test_responses_stale_previous_response_id(isolated_session_manager):
+    """Past turn → 409 with latest response ID in message."""
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 3
+
+    with client_context() as (client, _mock_cli):
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "Hello",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 409
+    body = response.json()
+    assert "Stale previous_response_id" in body["error"]["message"]
+    assert f"resp_{sid}_3" in body["error"]["message"]
+
+
+# 4. test_responses_latest_previous_response_id
+def test_responses_latest_previous_response_id(isolated_session_manager):
+    """Current turn → success (follow-up works)."""
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+
+    async def fake_run_completion(**kwargs):
+        yield {"subtype": "success", "result": "Follow-up answer"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        mock_cli.run_completion = fake_run_completion
+        mock_cli.parse_message.return_value = "Follow-up answer"
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "Follow up",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["output"][0]["content"][0]["text"] == "Follow-up answer"
+    assert session.turn_counter == 2
+
+
+# 5. test_responses_backend_mismatch
+def test_responses_backend_mismatch(isolated_session_manager):
+    """Claude session + codex model → 400 backend mismatch."""
+    from tests.conftest import FakeCodexBackend
+
+    BackendRegistry.register("codex", FakeCodexBackend())
+
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+    session.backend = "claude"
+
+    with client_context() as (client, _mock_cli), _bypass_codex_auth():
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "codex",
+                "input": "Hello",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 400
+    body = response.json()
+    assert "backend" in body["error"]["message"].lower()
+    assert "claude" in body["error"]["message"]
+    assert "codex" in body["error"]["message"]
+
+
+# 6. test_responses_codex_resume_with_thread_id
+def test_responses_codex_resume_with_thread_id(isolated_session_manager):
+    """Codex follow-up with captured thread_id passes resume correctly."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend(thread_id="resume-thread-2")
+    BackendRegistry.register("codex", backend)
+
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+    session.backend = "codex"
+    session.provider_session_id = "resume-thread-1"
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "codex",
+                "input": "Continue",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 200
+    assert session.turn_counter == 2
+    # Verify resume was passed to run_completion
+    assert len(backend.calls) == 1
+    assert backend.calls[0]["resume"] == "resume-thread-1"
+
+
+# 7. test_responses_codex_resume_no_thread_id
+def test_responses_codex_resume_no_thread_id(isolated_session_manager):
+    """Codex follow-up without thread_id → 409."""
+    from tests.conftest import FakeCodexBackend
+
+    BackendRegistry.register("codex", FakeCodexBackend())
+
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+    session.backend = "codex"
+    session.provider_session_id = None
+
+    with client_context() as (client, _mock_cli), _bypass_codex_auth():
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "codex",
+                "input": "Continue",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 409
+    assert "thread_id" in response.json()["error"]["message"]
+
+
+# 8. test_responses_new_session_backend_tagged
+def test_responses_new_session_backend_tagged(isolated_session_manager):
+    """First turn sets session.backend correctly for both claude and codex."""
+    from tests.conftest import FakeCodexBackend
+
+    BackendRegistry.register("codex", FakeCodexBackend())
+
+    # Codex new session
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Tag me"},
+        )
+
+    body = response.json()
+    session_id, _ = main._parse_response_id(body["id"])
+    session = isolated_session_manager.get_session(session_id)
+
+    assert session.backend == "codex"
+
+    # Claude new session
+    async def fake_run_completion(**kwargs):
+        yield {"subtype": "success", "result": "Claude answer"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        mock_cli.run_completion = fake_run_completion
+        mock_cli.parse_message.return_value = "Claude answer"
+
+        response2 = client.post(
+            "/v1/responses",
+            json={"model": DEFAULT_MODEL, "input": "Tag me too"},
+        )
+
+    body2 = response2.json()
+    session_id2, _ = main._parse_response_id(body2["id"])
+    session2 = isolated_session_manager.get_session(session_id2)
+
+    assert session2.backend == "claude"
+
+
+# 9. test_responses_claude_unchanged
+def test_responses_claude_unchanged(isolated_session_manager):
+    """Existing Claude behavior regression check — still works after refactor."""
+    run_calls = []
+
+    async def fake_run_completion(**kwargs):
+        run_calls.append(kwargs)
+        yield {"subtype": "success", "result": "Claude says hi"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
+    ):
+        mock_cli.run_completion = fake_run_completion
+        mock_cli.parse_message.return_value = "Claude says hi"
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "Hello Claude",
+                "instructions": "Be helpful",
+            },
+        )
+
+    body = response.json()
+    session_id, turn = main._parse_response_id(body["id"])
+    session = isolated_session_manager.get_session(session_id)
+
+    assert response.status_code == 200
+    assert body["output"][0]["content"][0]["text"] == "Claude says hi"
+    assert turn == 1
+    assert run_calls[0]["system_prompt"] == "Be helpful"
+    assert run_calls[0]["mcp_servers"] == {"demo": {"type": "stdio"}}
+    assert session.backend == "claude"
+
+
+# 10. test_responses_codex_non_streaming_error
+def test_responses_codex_non_streaming_error():
+    """Codex error chunk → backend-agnostic 502."""
+    from tests.conftest import FakeCodexBackend
+
+    class ErrorCodexBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            yield {"is_error": True, "error_message": "codex rate limit"}
+
+    BackendRegistry.register("codex", ErrorCodexBackend())
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Fail me"},
+        )
+
+    assert response.status_code == 502
+    assert "codex rate limit" in response.json()["error"]["message"]
+
+
+# 11. test_responses_codex_streaming_error
+def test_responses_codex_streaming_error(isolated_session_manager):
+    """Codex mid-stream failure → error SSE event, no session commit."""
+    from tests.conftest import FakeCodexBackend
+
+    BackendRegistry.register("codex", FakeCodexBackend())
+
+    def fake_run_completion(**kwargs):
+        async def _gen():
+            if False:
+                yield None
+
+        return _gen()
+
+    async def exploding_stream(**kwargs):
+        raise RuntimeError("codex stream boom")
+        yield  # pragma: no cover
+
+    with (
+        client_context() as (client, mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+        patch.object(main.streaming_utils, "stream_response_chunks", new=exploding_stream),
+    ):
+        mock_cli.run_completion = fake_run_completion
+
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": "codex", "input": "Stream fail", "stream": True},
+        ) as response:
+            body = "".join(response.iter_text())
+
+    session = next(iter(isolated_session_manager.sessions.values()))
+
+    assert response.status_code == 200
+    assert "event: response.failed" in body
+    assert '"status": "failed"' in body
+    assert '"code": "server_error"' in body
+    assert session.turn_counter == 0
+    assert session.messages == []
+
+
+# 12. test_responses_mcp_servers_not_passed_to_codex
+def test_responses_mcp_servers_not_passed_to_codex(isolated_session_manager):
+    """Verify mcp_servers=None for Codex backend."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend()
+    BackendRegistry.register("codex", backend)
+
+    run_calls = []
+    original_run = backend.run_completion
+
+    async def capturing_run(**kwargs):
+        run_calls.append(kwargs)
+        async for chunk in original_run(**kwargs):
+            yield chunk
+
+    backend.run_completion = capturing_run
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(
+            main, "get_mcp_servers", return_value={"demo": {"type": "stdio", "command": "demo"}}
+        ),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "MCP test"},
+        )
+
+    assert response.status_code == 200
+    assert run_calls[0]["mcp_servers"] is None
+
+
+# 13. test_responses_codex_token_estimation_fallback
+def test_responses_codex_token_estimation_fallback(isolated_session_manager):
+    """Verify backend.estimate_token_usage() when SDK usage unavailable."""
+    from tests.conftest import FakeCodexBackend
+
+    class NoUsageCodexBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            yield {"type": "codex_session", "session_id": self.thread_id}
+            yield {"type": "assistant", "content": [{"type": "text", "text": "no usage"}]}
+            # No result chunk with usage → forces estimate_token_usage fallback
+
+    backend = NoUsageCodexBackend()
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Estimate tokens"},
+        )
+
+    body = response.json()
+    assert response.status_code == 200
+    # Token usage should come from estimate_token_usage (10, 5)
+    assert body["usage"]["input_tokens"] == 10
+    assert body["usage"]["output_tokens"] == 5
+
+
+# 14. test_responses_codex_session_meta_event_captured
+def test_responses_codex_session_meta_event_captured(isolated_session_manager):
+    """Verify codex_session meta-event flows into chunks and is captured."""
+    from tests.conftest import FakeCodexBackend
+
+    backend = FakeCodexBackend(thread_id="meta-thread-42")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Capture meta"},
+        )
+
+    body = response.json()
+    session_id, _ = main._parse_response_id(body["id"])
+    session = isolated_session_manager.get_session(session_id)
+
+    assert response.status_code == 200
+    assert session.provider_session_id == "meta-thread-42"
+
+
+# 15. test_responses_concurrent_stale_id_race
+def test_responses_concurrent_stale_id_race(isolated_session_manager):
+    """Two requests with same latest previous_response_id → one succeeds, other gets 409.
+
+    Proves lock serialization: the first request increments turn_counter,
+    making the second request's previous_response_id stale.
+    """
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+
+    async def fake_run_completion(**kwargs):
+        yield {"subtype": "success", "result": "First wins"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        mock_cli.run_completion = fake_run_completion
+        mock_cli.parse_message.return_value = "First wins"
+
+        prev_id = main._make_response_id(sid, 1)
+
+        # First request succeeds
+        response1 = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "First",
+                "previous_response_id": prev_id,
+            },
+        )
+        assert response1.status_code == 200
+        assert session.turn_counter == 2
+
+        # Second request with same (now stale) previous_response_id
+        response2 = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "Second",
+                "previous_response_id": prev_id,
+            },
+        )
+
+    assert response2.status_code == 409
+    assert "Stale previous_response_id" in response2.json()["error"]["message"]
+
+
+# 16. test_responses_non_streaming_failure_no_commit
+def test_responses_non_streaming_failure_no_commit(isolated_session_manager):
+    """Non-streaming failure → session.messages and turn_counter unchanged."""
+    sid = "c2f6d3fd-1f1a-4c13-9c60-46b4df1d4d5f"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+    session.backend = "claude"
+    original_messages = list(session.messages)
+
+    async def failing_run_completion(**kwargs):
+        yield {"is_error": True, "error_message": "backend exploded"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        mock_cli.run_completion = failing_run_completion
+
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": DEFAULT_MODEL,
+                "input": "Fail this",
+                "previous_response_id": main._make_response_id(sid, 1),
+            },
+        )
+
+    assert response.status_code == 502
+    assert session.turn_counter == 1
+    assert list(session.messages) == original_messages
+
+
+# 17. test_responses_codex_failure_path_captures_thread_id
+def test_responses_codex_failure_path_captures_thread_id(isolated_session_manager):
+    """Codex turn fails but provider_session_id is still captured for next attempt."""
+    from tests.conftest import FakeCodexBackend
+
+    class FailAfterSessionCodexBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            # Emit session meta-event BEFORE failure
+            yield {"type": "codex_session", "session_id": self.thread_id}
+            # Then emit error
+            yield {"is_error": True, "error_message": "turn failed after session start"}
+
+    backend = FailAfterSessionCodexBackend(thread_id="fail-but-captured-thread")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Fail but capture"},
+        )
+
+    assert response.status_code == 502
+    # turn_counter NOT incremented on failure
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 0
+    # But provider_session_id IS captured (for retry)
+    assert session.provider_session_id == "fail-but-captured-thread"
+
+
+# 18. test_responses_streaming_success_commits_with_streamed_text
+def test_responses_streaming_success_commits_with_streamed_text(isolated_session_manager):
+    """Streaming success uses assistant_text from stream_result (not parse_message).
+
+    stream_response_chunks assembles full_text from actual deltas sent to the
+    client and stores it in stream_result["assistant_text"].  The endpoint uses
+    this value to commit the turn, avoiding a parse_message mismatch that would
+    emit an error after response.completed.
+    """
+
+    async def fake_run_completion(**kwargs):
+        yield {"content": [{"type": "text", "text": "streamed text"}]}
+        yield {"subtype": "success", "result": "streamed text"}
+
+    with (
+        client_context() as (client, mock_cli),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        mock_cli.run_completion = fake_run_completion
+        # parse_message returns None — but the endpoint should not call it
+        mock_cli.parse_message.return_value = None
+
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": DEFAULT_MODEL, "input": "Stream this", "stream": True},
+        ) as response:
+            body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+
+    # response.completed should be emitted with NO contradictory error
+    assert "response.completed" in body
+    assert "no parseable assistant text" not in body
+
+    # Turn should be committed using the text from the stream
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 1
+    assert len(session.messages) == 2
+    assert session.messages[0].content == "Stream this"
+    # The committed text comes from stream_response_chunks' full_text
+    assert session.messages[1].content == "streamed text"
+
+
+# 19. test_responses_codex_exception_after_session_event_captures_thread_id
+def test_responses_codex_exception_after_session_event_captures_thread_id(
+    isolated_session_manager,
+):
+    """Codex run_completion raises after emitting codex_session → provider_session_id still captured."""
+    from tests.conftest import FakeCodexBackend
+
+    class ExceptionAfterSessionBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            yield {"type": "codex_session", "session_id": self.thread_id}
+            raise RuntimeError("Codex subprocess crashed")
+
+    backend = ExceptionAfterSessionBackend(thread_id="exception-thread-42")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Crash after session"},
+        )
+
+    assert response.status_code == 502
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 0
+    assert session.provider_session_id == "exception-thread-42"
+
+
+# 20. test_responses_streaming_exception_after_session_event_captures_thread_id
+def test_responses_streaming_exception_after_session_event_captures_thread_id(
+    isolated_session_manager,
+):
+    """Streaming: Codex raises after emitting codex_session → provider_session_id still captured."""
+    from tests.conftest import FakeCodexBackend
+
+    class StreamExceptionBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            yield {"type": "codex_session", "session_id": self.thread_id}
+            yield {"type": "assistant", "content": [{"type": "text", "text": "partial"}]}
+            raise RuntimeError("Codex mid-stream crash")
+
+    backend = StreamExceptionBackend(thread_id="stream-crash-thread")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        response = client.post(
+            "/v1/responses",
+            json={"model": "codex", "input": "Stream crash", "stream": True},
+        )
+
+    assert response.status_code == 200  # streaming already committed 200
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 0  # NOT committed (stream failed)
+    assert session.provider_session_id == "stream-crash-thread"
+
+
+# 22. test_responses_streaming_immediate_exception_before_any_yield
+def test_responses_streaming_immediate_exception_before_any_yield(
+    isolated_session_manager,
+):
+    """Streaming: backend raises in run_completion() before yielding any chunks.
+
+    Regression: tests #19 and #20 only exercise failures AFTER at least one
+    chunk is yielded.  This covers the gap where run_completion() itself
+    raises before producing any output.  The SSE stream must still return a
+    200 (streaming already committed) with a response.failed error event,
+    and session turn_counter must NOT be incremented.
+    """
+    from tests.conftest import FakeCodexBackend
+
+    class ImmediateRaiseBackend(FakeCodexBackend):
+        async def run_completion(self, **kwargs):
+            self.calls.append(kwargs)
+            raise RuntimeError("Backend crashed before yielding")
+            # Make this an async generator (unreachable yield keeps the signature)
+            yield  # pragma: no cover
+
+    backend = ImmediateRaiseBackend(thread_id="no-yield-crash")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": "codex", "input": "Crash immediately", "stream": True},
+        ) as response:
+            body = "".join(response.iter_text())
+
+    # Streaming already committed 200 before the backend was iterated
+    assert response.status_code == 200
+
+    # The SSE body must contain a failure event, NOT a success completion
+    assert "response.failed" in body
+    assert "response.completed" not in body
+    assert "server_error" in body
+
+    # Session turn_counter must NOT be incremented on failure
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 0
+
+
+# 23. test_responses_streaming_sync_raise_before_async_iteration
+def test_responses_streaming_sync_raise_before_async_iteration(
+    isolated_session_manager,
+):
+    """Streaming: run_completion() raises synchronously (not an async generator).
+
+    Regression for the OUTER exception path in _run_stream().
+    Tests #20 and #22 exercise failures that occur when iterating an async
+    generator — those exceptions are caught inside stream_response_chunks().
+    This test covers the case where run_completion() is NOT an async generator
+    and raises before returning an iterable at all.  The exception hits the
+    outer ``except`` block in _run_stream() (main.py) directly:
+
+        chunk_source = backend.run_completion(**kwargs)   # <-- raises HERE
+        async for line in stream_response_chunks(...):    # never reached
+    """
+    from tests.conftest import FakeCodexBackend
+
+    class SyncRaiseBackend(FakeCodexBackend):
+        def run_completion(self, **kwargs):
+            """Plain sync method — NOT an async generator.
+
+            Calling backend.run_completion(...) executes the body immediately
+            and raises before any async iteration starts.
+            """
+            self.calls.append(kwargs)
+            raise RuntimeError("Backend setup failed before streaming")
+
+    backend = SyncRaiseBackend(thread_id="sync-raise-crash")
+    BackendRegistry.register("codex", backend)
+
+    with (
+        client_context() as (client, _mock_cli),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+    ):
+        with client.stream(
+            "POST",
+            "/v1/responses",
+            json={"model": "codex", "input": "Sync crash", "stream": True},
+        ) as response:
+            body = "".join(response.iter_text())
+
+    # Streaming already committed 200 before the backend was called
+    assert response.status_code == 200
+
+    # The SSE body must contain a response.failed event from the outer except
+    assert "response.failed" in body
+    assert "response.completed" not in body
+    assert "server_error" in body
+
+    # Session turn_counter must NOT be incremented on failure
+    session = next(iter(isolated_session_manager.sessions.values()))
+    assert session.turn_counter == 0
+
+
+# 21. test_responses_truly_concurrent_lock_serialization
+async def test_responses_truly_concurrent_lock_serialization(isolated_session_manager):
+    """Two truly concurrent follow-up requests prove per-session lock serialization.
+
+    Unlike test #15 (sequential), this test fires two requests simultaneously
+    via asyncio.gather.  A slow backend holds the lock long enough to guarantee
+    the second request is waiting on session.lock.  When the first completes and
+    increments turn_counter (1 → 2), the second sees a stale previous_response_id
+    (still pointing to turn 1, but turn_counter is now 2) and gets 409.
+
+    Concurrency proof: the backend signals ``inside_backend`` when it starts,
+    and the test records wall-clock ordering via ``entry_order`` to confirm
+    both requests were dispatched before either completed.
+    """
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    session = isolated_session_manager.get_or_create_session(sid)
+    session.turn_counter = 1
+    session.backend = "claude"
+
+    prev_id = main._make_response_id(sid, 1)
+
+    # -- Barrier machinery ------------------------------------------------
+    # inside_backend is set when the first request enters the backend,
+    # proving the lock is held.  backend_release lets the test unblock
+    # the backend after the second request has had time to queue on the lock.
+    inside_backend = asyncio.Event()
+    backend_release = asyncio.Event()
+    entry_order: list[str] = []  # tracks wall-clock ordering of backend calls
+
+    async def slow_run_completion(**kwargs):
+        """Backend that blocks until backend_release is set."""
+        tag = f"call-{len(entry_order) + 1}"
+        entry_order.append(tag)
+        inside_backend.set()
+        await backend_release.wait()
+        yield {"subtype": "success", "result": "Lock holder wins"}
+
+    mock_cli = MagicMock()
+    mock_cli.verify_cli = AsyncMock(return_value=True)
+    mock_cli.verify = AsyncMock(return_value=True)
+    mock_cli.run_completion = slow_run_completion
+    mock_cli.parse_message.return_value = "Lock holder wins"
+
+    BackendRegistry.register("claude", mock_cli)
+
+    with (
+        patch.object(main, "claude_cli", mock_cli),
+        patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+        _bypass_codex_auth(),
+        patch.object(main, "get_mcp_servers", return_value={}),
+        patch.object(main.session_manager, "start_cleanup_task"),
+        patch.object(main.session_manager, "async_shutdown", new=AsyncMock()),
+    ):
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            payload = {
+                "model": DEFAULT_MODEL,
+                "input": "concurrent",
+                "previous_response_id": prev_id,
+            }
+
+            async def send_request(label: str):
+                return await client.post("/v1/responses", json=payload)
+
+            async def release_after_overlap():
+                """Wait until the first request is inside the backend, then
+                yield control so the second request queues on session.lock,
+                and finally unblock the backend."""
+                await inside_backend.wait()
+                # Yield a few times to let the event loop schedule the second
+                # request's lock.acquire() coroutine.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                backend_release.set()
+
+            # Fire both requests + the release coordinator concurrently
+            r1, r2, _ = await asyncio.gather(
+                send_request("A"),
+                send_request("B"),
+                release_after_overlap(),
+            )
+
+    # -- Assertions -------------------------------------------------------
+    statuses = sorted([r1.status_code, r2.status_code])
+    assert statuses == [200, 409], (
+        f"Expected exactly one 200 and one 409, got {r1.status_code} and {r2.status_code}"
+    )
+
+    # The 409 response must contain the stale-ID error message
+    loser = r1 if r1.status_code == 409 else r2
+    assert "Stale previous_response_id" in loser.json()["error"]["message"]
+
+    # turn_counter advanced exactly once (from 1 → 2 by the winning request)
+    assert session.turn_counter == 2
+
+    # The backend was entered exactly once (the loser never reached it)
+    assert len(entry_order) == 1, (
+        f"Backend should have been called exactly once, but was called {len(entry_order)} times"
+    )

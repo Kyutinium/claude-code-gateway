@@ -810,6 +810,7 @@ async def stream_response_chunks(
         metadata=_metadata,
     )
     stream_result["success"] = True
+    stream_result["assistant_text"] = final_text
     yield make_response_sse(
         "response.completed", response_obj=final_resp, sequence_number=_next_seq()
     )

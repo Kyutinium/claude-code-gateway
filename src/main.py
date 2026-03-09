@@ -45,6 +45,7 @@ from src.session_manager import session_manager
 from src.backend_registry import BackendClient, BackendRegistry, resolve_model, ResolvedModel
 from src.response_models import (
     ResponseCreateRequest,
+    ResponseErrorDetail,
     ResponseObject,
     OutputItem,
     ContentPart,
@@ -1392,6 +1393,103 @@ def _parse_response_id(resp_id: str):
     return parts[1], turn
 
 
+async def _responses_streaming_preflight(
+    body: ResponseCreateRequest,
+    resolved: ResolvedModel,
+    backend: "BackendClient",
+    session,
+    session_id: str,
+    is_new_session: bool,
+    prompt: str,
+    system_prompt: Optional[str],
+) -> Dict[str, Any]:
+    """Run session guards BEFORE StreamingResponse is created for /v1/responses.
+
+    Acquires ``session.lock`` and validates stale-ID, backend mismatch, and
+    Codex resume guard inside the lock.  On validation failure the lock is
+    released and an HTTPException is raised (proper HTTP status).
+
+    Returns a dict consumed by the streaming generator.  The generator's
+    ``finally`` block is responsible for releasing the lock.
+    """
+    await session.lock.acquire()
+
+    try:
+        # --- Validation inside lock (TOCTOU-safe) ---
+
+        if not is_new_session:
+            # _parse_response_id already extracted ``turn``; re-parse here
+            parsed = _parse_response_id(body.previous_response_id)
+            _, turn = parsed  # guaranteed valid at this point
+
+            if turn != session.turn_counter:
+                if turn < session.turn_counter:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Stale previous_response_id: only the latest response "
+                            f"(resp_{session_id}_{session.turn_counter}) can be continued"
+                        ),
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(
+                            f"previous_response_id '{body.previous_response_id}' "
+                            f"references a future turn"
+                        ),
+                    )
+
+            # Backend mismatch guard
+            if session.backend and session.backend != resolved.backend:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Session belongs to backend '{session.backend}', "
+                        f"but model '{body.model}' resolves to '{resolved.backend}'. "
+                        f"Cannot mix backends within a session."
+                    ),
+                )
+
+            # Codex resume guard
+            if resolved.backend == "codex" and not session.provider_session_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Cannot resume Codex session: no thread_id from previous turn. "
+                        "Start a new session instead."
+                    ),
+                )
+
+        # Compute resume_id and next_turn
+        resume_id = session.provider_session_id or session_id if not is_new_session else None
+        next_turn = session.turn_counter + 1
+
+        # Tag backend on first turn
+        if is_new_session:
+            session.backend = resolved.backend
+
+    except Exception:
+        session.lock.release()
+        raise
+
+    return {
+        "session": session,
+        "lock_acquired": True,
+        "next_turn": next_turn,
+        "resume_id": resume_id,
+        "chunk_kwargs": dict(
+            prompt=prompt,
+            model=resolved.provider_model,
+            system_prompt=system_prompt if is_new_session else None,
+            permission_mode=PERMISSION_MODE_BYPASS,
+            mcp_servers=get_mcp_servers() if resolved.backend == "claude" else None,
+            session_id=session_id if is_new_session else None,
+            resume=resume_id,
+        ),
+    }
+
+
 @app.post("/v1/responses")
 @rate_limit_endpoint("responses")
 async def create_response(
@@ -1399,25 +1497,16 @@ async def create_response(
     body: ResponseCreateRequest,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ):
-    """OpenAI Responses API compatible endpoint.
+    """OpenAI Responses API compatible endpoint with backend dispatch.
 
     Supports conversation chaining via previous_response_id.
-    Claude SDK manages conversation history natively through ClaudeSDKClient.
+    Routes to Claude or Codex backend based on the model field.
     """
     await verify_api_key(request, credentials)
 
-    # Validate Claude Code authentication (same preflight as /v1/chat/completions)
-    auth_valid, auth_info = validate_claude_code_auth()
-    if not auth_valid:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": "Claude Code authentication failed",
-                "errors": auth_info.get("errors", []),
-                "method": auth_info.get("method", "none"),
-                "help": "Check /v1/auth/status for detailed authentication information",
-            },
-        )
+    # Resolve model → backend and validate auth
+    resolved, backend = _resolve_and_get_backend(body.model)
+    _validate_backend_auth(resolved.backend)
 
     # Validate: instructions + previous_response_id is not allowed
     if body.previous_response_id and body.instructions:
@@ -1440,12 +1529,18 @@ async def create_response(
         if not session:
             raise HTTPException(
                 status_code=404,
-                detail=f"Session for previous_response_id '{body.previous_response_id}' not found or expired",
+                detail=(
+                    f"Session for previous_response_id "
+                    f"'{body.previous_response_id}' not found or expired"
+                ),
             )
+        # Future turn check (outside lock — safe because turn_counter only grows)
         if turn > session.turn_counter:
             raise HTTPException(
                 status_code=404,
-                detail=f"previous_response_id '{body.previous_response_id}' references a future turn",
+                detail=(
+                    f"previous_response_id '{body.previous_response_id}' references a future turn"
+                ),
             )
     else:
         session_id = str(uuid.uuid4())
@@ -1477,25 +1572,22 @@ async def create_response(
     is_new_session = body.previous_response_id is None
 
     if body.stream:
-        # Reserve next turn for resp_id (committed only on success)
-        next_turn = session.turn_counter + 1
+        # Run preflight BEFORE StreamingResponse so HTTPExceptions produce
+        # proper HTTP error status codes (not swallowed inside the generator).
+        preflight = await _responses_streaming_preflight(
+            body, resolved, backend, session, session_id, is_new_session, prompt, system_prompt
+        )
+
+        next_turn = preflight["next_turn"]
         resp_id = _make_response_id(session_id, next_turn)
         output_item_id = _generate_msg_id()
 
         async def _run_stream():
+            lock_acquired = preflight["lock_acquired"]
             stream_result = {"success": False}
             try:
-                chunk_source = claude_cli.run_completion(
-                    prompt=prompt,
-                    model=body.model if body.model not in ("", None) else None,
-                    system_prompt=system_prompt if is_new_session else None,
-                    permission_mode=PERMISSION_MODE_BYPASS,
-                    mcp_servers=get_mcp_servers(),
-                    session_id=session_id if is_new_session else None,
-                    resume=session_id if not is_new_session else None,
-                )
-
                 chunks_buffer = []
+                chunk_source = backend.run_completion(**preflight["chunk_kwargs"])
                 async for line in streaming_utils.stream_response_chunks(
                     chunk_source=chunk_source,
                     model=body.model,
@@ -1509,11 +1601,19 @@ async def create_response(
                 ):
                     yield line
 
-                # Commit turn counter and update session only on success
+                # ALWAYS capture provider_session_id (even on failure).
+                # On failure, this is internal-only: no response_id is committed for the
+                # client, so the captured thread_id is not externally recoverable.
+                _capture_provider_session_id(chunks_buffer, session)
+
+                # SUCCESS-ONLY: commit turn counter and session messages.
+                # Use assistant_text assembled by stream_response_chunks() from
+                # actual deltas sent to the client.  This avoids a parse_message()
+                # mismatch that could emit an error *after* response.completed.
                 if stream_result.get("success"):
-                    session.turn_counter = next_turn
-                    assistant_text = claude_cli.parse_message(chunks_buffer)
+                    assistant_text = stream_result.get("assistant_text") or ""
                     if assistant_text:
+                        session.turn_counter = next_turn
                         session.add_messages([Message(role="user", content=prompt)])
                         session_manager.add_assistant_response(
                             session_id, Message(role="assistant", content=assistant_text)
@@ -1521,53 +1621,126 @@ async def create_response(
 
             except Exception as e:
                 logger.error("Responses API Stream: setup error: %s", e, exc_info=True)
+                # Capture provider_session_id from partial chunks on exception.
+                # Internal-only: no response_id is committed, so not client-recoverable.
+                if chunks_buffer:
+                    _capture_provider_session_id(chunks_buffer, session)
+                failed_resp = ResponseObject(
+                    id=resp_id,
+                    model=body.model,
+                    status="failed",
+                    metadata=body.metadata or {},
+                    error=ResponseErrorDetail(code="server_error", message="Internal server error"),
+                )
                 yield streaming_utils.make_response_sse(
-                    "error",
-                    code="server_error",
-                    message="Internal server error",
+                    "response.failed",
+                    response_obj=failed_resp,
                     sequence_number=0,
                 )
+            finally:
+                if lock_acquired:
+                    session.lock.release()
 
         return StreamingResponse(_run_stream(), media_type="text/event-stream")
 
+    # --- Non-streaming path ---
     try:
-        # Run query — SDK maintains conversation history via session_id/resume
-        chunks = []
-        async for chunk in claude_cli.run_completion(
-            prompt=prompt,
-            model=body.model if body.model not in ("", None) else None,
-            system_prompt=system_prompt if is_new_session else None,
-            permission_mode=PERMISSION_MODE_BYPASS,
-            mcp_servers=get_mcp_servers(),
-            session_id=session_id if is_new_session else None,
-            resume=session_id if not is_new_session else None,
-        ):
-            chunks.append(chunk)
+        async with session.lock:
+            # --- Validation inside lock (TOCTOU-safe) ---
+            if not is_new_session:
+                parsed = _parse_response_id(body.previous_response_id)
+                _, turn = parsed
+
+                if turn != session.turn_counter:
+                    if turn < session.turn_counter:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"Stale previous_response_id: only the latest response "
+                                f"(resp_{session_id}_{session.turn_counter}) can be continued"
+                            ),
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=(
+                                f"previous_response_id '{body.previous_response_id}' "
+                                f"references a future turn"
+                            ),
+                        )
+
+                # Backend mismatch guard
+                if session.backend and session.backend != resolved.backend:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Session belongs to backend '{session.backend}', "
+                            f"but model '{body.model}' resolves to '{resolved.backend}'. "
+                            f"Cannot mix backends within a session."
+                        ),
+                    )
+
+                # Codex resume guard
+                if resolved.backend == "codex" and not session.provider_session_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Cannot resume Codex session: no thread_id from previous turn. "
+                            "Start a new session instead."
+                        ),
+                    )
+
+            # Compute resume_id and next_turn
+            resume_id = session.provider_session_id or session_id if not is_new_session else None
+            next_turn = session.turn_counter + 1
+
+            # Tag backend on first turn
+            if is_new_session:
+                session.backend = resolved.backend
+
+            # Execute backend
+            chunks = []
+            try:
+                async for chunk in backend.run_completion(
+                    prompt=prompt,
+                    model=resolved.provider_model,
+                    system_prompt=system_prompt if is_new_session else None,
+                    permission_mode=PERMISSION_MODE_BYPASS,
+                    mcp_servers=get_mcp_servers() if resolved.backend == "claude" else None,
+                    session_id=session_id if is_new_session else None,
+                    resume=resume_id,
+                ):
+                    chunks.append(chunk)
+            finally:
+                # ALWAYS capture provider_session_id (even on failure/exception).
+                # On failure, this is internal-only: no response_id is committed for the
+                # client, so the captured thread_id is not externally recoverable.
+                if chunks:
+                    _capture_provider_session_id(chunks, session)
+
+            # Check for backend errors (run_completion wraps exceptions as error chunks)
+            for chunk in chunks:
+                if isinstance(chunk, dict) and chunk.get("is_error"):
+                    error_msg = chunk.get("error_message", "Unknown backend error")
+                    raise HTTPException(status_code=502, detail=f"Backend error: {error_msg}")
+
+            # Extract assistant text
+            assistant_text = backend.parse_message(chunks)
+            if not assistant_text:
+                raise HTTPException(status_code=502, detail="No response from backend")
+
+            # SUCCESS-ONLY: commit turn counter and session messages
+            session.turn_counter = next_turn
+            session.add_messages([Message(role="user", content=prompt)])
+            session_manager.add_assistant_response(
+                session_id, Message(role="assistant", content=assistant_text)
+            )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Responses API: Claude SDK error: {e}", exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Claude SDK error: {e}")
-
-    # Check for SDK errors (run_completion wraps exceptions as error chunks)
-    for chunk in chunks:
-        if isinstance(chunk, dict) and chunk.get("is_error"):
-            error_msg = chunk.get("error_message", "Unknown Claude SDK error")
-            raise HTTPException(status_code=502, detail=f"Claude SDK error: {error_msg}")
-
-    # Extract assistant text
-    assistant_text = claude_cli.parse_message(chunks)
-    if not assistant_text:
-        raise HTTPException(status_code=502, detail="No response from Claude SDK")
-
-    # Track messages in session for /v1/sessions stats consistency
-    session.add_messages([Message(role="user", content=prompt)])
-    session_manager.add_assistant_response(
-        session_id, Message(role="assistant", content=assistant_text)
-    )
-
-    # Commit turn counter on success
-    session.turn_counter += 1
+        logger.error(f"Responses API: Backend error: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Backend error: {e}")
 
     # Token usage (prefer real SDK values)
     sdk_usage = streaming_utils.extract_sdk_usage(chunks)
@@ -1575,8 +1748,9 @@ async def create_response(
         prompt_tokens = sdk_usage["prompt_tokens"]
         completion_tokens = sdk_usage["completion_tokens"]
     else:
-        prompt_tokens = MessageAdapter.estimate_tokens(prompt)
-        completion_tokens = MessageAdapter.estimate_tokens(assistant_text)
+        token_usage = backend.estimate_token_usage(prompt, assistant_text, body.model)
+        prompt_tokens = token_usage["prompt_tokens"]
+        completion_tokens = token_usage["completion_tokens"]
 
     # Build response object
     resp_id = _make_response_id(session_id, session.turn_counter)

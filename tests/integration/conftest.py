@@ -8,11 +8,10 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import pytest
 
-from src.backend_registry import BackendRegistry
+from tests.conftest import FakeCodexBackend  # noqa: F401 — re-exported for local use
 
 # ---------------------------------------------------------------------------
 # Skip markers
@@ -114,65 +113,9 @@ def integration_codex_cli(mock_codex_bin, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# FakeCodexBackend (for session integration tests)
+# FakeCodexBackend (re-exported from tests/conftest.py for backward compat)
 # ---------------------------------------------------------------------------
 
-
-class FakeCodexBackend:
-    """Minimal BackendClient Protocol implementation for session tests."""
-
-    def __init__(self, thread_id: str = "fake-thread-123"):
-        self.thread_id = thread_id
-        self.calls: List[Dict[str, Any]] = []
-
-    async def run_completion(
-        self,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        model: Optional[str] = None,
-        stream: bool = True,
-        max_turns: int = 10,
-        allowed_tools: Optional[List[str]] = None,
-        disallowed_tools: Optional[List[str]] = None,
-        session_id: Optional[str] = None,
-        resume: Optional[str] = None,
-        permission_mode: Optional[str] = None,
-        output_format: Optional[Dict[str, Any]] = None,
-        mcp_servers: Optional[Dict[str, Any]] = None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        self.calls.append(
-            {"prompt": prompt, "resume": resume, "model": model, "session_id": session_id}
-        )
-        yield {"type": "codex_session", "session_id": self.thread_id}
-        yield {"type": "assistant", "content": [{"type": "text", "text": "codex reply"}]}
-        yield {
-            "type": "result",
-            "subtype": "success",
-            "result": "codex reply",
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
-            },
-        }
-
-    def parse_message(self, messages: List[Dict[str, Any]]) -> Optional[str]:
-        return "codex reply"
-
-    def estimate_token_usage(
-        self, prompt: str, completion: str, model: Optional[str] = None
-    ) -> Dict[str, int]:
-        return {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-
-    async def verify(self) -> bool:
-        return True
-
-
-@pytest.fixture
-def fake_codex_backend():
-    """Register a FakeCodexBackend and clean up after the test."""
-    backend = FakeCodexBackend()
-    BackendRegistry.register("codex", backend)
-    yield backend
-    BackendRegistry.unregister("codex")
+# FakeCodexBackend and fake_codex_backend fixture are imported from
+# tests/conftest.py (see import at top of file). The fixture is available
+# to all tests via conftest.py's autouse discovery.
