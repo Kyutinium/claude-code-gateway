@@ -33,6 +33,14 @@ SESSION_MAX_AGE_MINUTES = int(os.getenv("SESSION_MAX_AGE_MINUTES", "60"))
 # Format: {"mcpServers": {"name": {"type": "stdio", "command": "...", "args": [...]}}}
 MCP_CONFIG = os.getenv("MCP_CONFIG", "")
 
+# Streaming display: wrap intermediate SDK messages in <think></think> tags
+# so frontends like Open WebUI collapse tool activity and show only the final result.
+WRAP_INTERMEDIATE_THINKING = os.getenv("WRAP_INTERMEDIATE_THINKING", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+
 # Rate Limiting defaults (requests per minute)
 # These are used by rate_limiter.py as the single source of truth
 RATE_LIMITS = {

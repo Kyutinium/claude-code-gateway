@@ -6,6 +6,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 
 from claude_agent_sdk.types import ToolResultBlock, ToolUseBlock
 
+from src.constants import WRAP_INTERMEDIATE_THINKING
 from src.message_adapter import MessageAdapter
 from src.models import ChatCompletionRequest, ChatCompletionStreamResponse, StreamChoice
 from src.response_models import (
@@ -658,6 +659,13 @@ async def stream_chunks(
     tool_acc = ToolUseAccumulator()
     collab_filter = CollabJsonStreamFilter()
 
+    # When WRAP_INTERMEDIATE_THINKING is enabled, all intermediate SDK output
+    # (tool calls, tool results, intermediate text) is wrapped in <think></think>
+    # tags so frontends like Open WebUI collapse it and only show the final result.
+    wrap_thinking = WRAP_INTERMEDIATE_THINKING
+    think_opened = False
+    result_text: Optional[str] = None
+
     def _emit_sse(text: str):
         nonlocal role_sent
         if not role_sent:
@@ -668,7 +676,19 @@ async def stream_chunks(
             ]
         return [make_sse(request_id, request.model, {"content": text})]
 
+    def _open_think():
+        """Emit <think> tag if wrapping is enabled and not yet opened."""
+        nonlocal think_opened
+        if wrap_thinking and not think_opened:
+            think_opened = True
+            return _emit_sse("<think>\n")
+        return []
+
     async for chunk in chunk_source:
+        # Capture result text for think-wrapping (before content_sent check skips it)
+        if wrap_thinking and chunk.get("subtype") == "success" and "result" in chunk:
+            result_text = chunk.get("result", "")
+
         # Handle AssistantMessage.error (auth failures, rate limits, etc.)
         if chunk.get("type") == "assistant" and chunk.get("error"):
             chunks_buffer.append(chunk)
@@ -689,8 +709,14 @@ async def stream_chunks(
         if text_delta is not None:
             token_streaming = True
             if text_delta:
+                # When wrapping, suppress SDK-native <think>/<think> tags
+                # since all content is already inside our wrapper.
+                if wrap_thinking and text_delta in ("<think>", "</think>"):
+                    continue
                 cleaned = collab_filter.feed(text_delta)
                 if cleaned:
+                    for sse in _open_think():
+                        yield sse
                     for sse in _emit_sse(cleaned):
                         yield sse
                     content_sent = True
@@ -703,7 +729,16 @@ async def stream_chunks(
         handled, tool_block = tool_acc.process_stream_event(chunk)
         if handled:
             if tool_block:
-                yield make_task_sse(request_id, request.model, tool_block)
+                if wrap_thinking:
+                    # Emit tool activity as text inside think tags
+                    tool_summary = f"\n[Tool: {tool_block.get('name', '?')}]\n"
+                    for sse in _open_think():
+                        yield sse
+                    for sse in _emit_sse(tool_summary):
+                        yield sse
+                    content_sent = True
+                else:
+                    yield make_task_sse(request_id, request.model, tool_block)
             continue
 
         # Skip duplicate assistant content in token-streaming mode
@@ -717,10 +752,20 @@ async def stream_chunks(
         if chunk.get("type") == "user":
             tool_results, parent_id = extract_user_tool_results(chunk)
             for tr_block in tool_results:
-                result_data = _normalize_tool_result(tr_block)
-                if parent_id:
-                    result_data["parent_tool_use_id"] = parent_id
-                yield make_task_sse(request_id, request.model, result_data)
+                if wrap_thinking:
+                    # Emit tool results as text inside think tags
+                    result_data = _normalize_tool_result(tr_block)
+                    summary = f"\n[Result: {str(result_data.get('content', ''))[:200]}]\n"
+                    for sse in _open_think():
+                        yield sse
+                    for sse in _emit_sse(summary):
+                        yield sse
+                    content_sent = True
+                else:
+                    result_data = _normalize_tool_result(tr_block)
+                    if parent_id:
+                        result_data["parent_tool_use_id"] = parent_id
+                    yield make_task_sse(request_id, request.model, result_data)
             chunks_buffer.append(chunk)
             continue
 
@@ -728,16 +773,36 @@ async def stream_chunks(
         # (Codex collab_tool_call → tool blocks arrive here, not via stream_event)
         embedded_tools = extract_embedded_tool_blocks(chunk)
         for tb in embedded_tools:
-            if tb.get("type") == "tool_use":
-                yield make_task_sse(request_id, request.model, tb)
-            elif tb.get("type") == "tool_result":
-                result_data = _normalize_tool_result(tb)
-                yield make_task_sse(request_id, request.model, result_data)
+            if wrap_thinking:
+                if tb.get("type") == "tool_use":
+                    tool_summary = f"\n[Tool: {tb.get('name', '?')}]\n"
+                    for sse in _open_think():
+                        yield sse
+                    for sse in _emit_sse(tool_summary):
+                        yield sse
+                    content_sent = True
+                elif tb.get("type") == "tool_result":
+                    result_data = _normalize_tool_result(tb)
+                    summary = f"\n[Result: {str(result_data.get('content', ''))[:200]}]\n"
+                    for sse in _open_think():
+                        yield sse
+                    for sse in _emit_sse(summary):
+                        yield sse
+                    content_sent = True
+            else:
+                if tb.get("type") == "tool_use":
+                    yield make_task_sse(request_id, request.model, tb)
+                elif tb.get("type") == "tool_result":
+                    result_data = _normalize_tool_result(tb)
+                    yield make_task_sse(request_id, request.model, result_data)
 
         # Content chunks (assistant messages, results)
         chunks_buffer.append(chunk)
         text = format_chunk_content(chunk, content_sent)
         if text:
+            if wrap_thinking:
+                for sse in _open_think():
+                    yield sse
             for sse in _emit_sse(text):
                 yield sse
             content_sent = True
@@ -745,12 +810,24 @@ async def stream_chunks(
     # Flush any remaining buffered text from the collab filter
     remaining = collab_filter.flush()
     if remaining:
+        if wrap_thinking:
+            for sse in _open_think():
+                yield sse
         for sse in _emit_sse(remaining):
             yield sse
         content_sent = True
 
     if tool_acc.has_incomplete:
         logger.warning("Incomplete tool_use blocks at stream end: %s", tool_acc.incomplete_keys)
+
+    # Close think wrapper and emit the final result text
+    if wrap_thinking and think_opened:
+        for sse in _emit_sse("\n</think>\n"):
+            yield sse
+        if result_text:
+            for sse in _emit_sse(result_text):
+                yield sse
+            content_sent = True
 
     if not role_sent:
         yield make_sse(request_id, request.model, {"role": "assistant", "content": ""})
