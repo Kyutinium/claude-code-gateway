@@ -37,7 +37,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import src.main as main
-from src.backend_registry import BackendRegistry
+import src.routes.chat as chat_module
+import src.routes.messages as messages_module
+import src.routes.responses as responses_module
+import src.routes.general as general_module
+from src.backend_registry import BackendRegistry, ResolvedModel
 from src.backends.base import BackendConfigError
 from src.constants import DEFAULT_MODEL
 from src.models import ChatCompletionRequest, Message, StreamOptions
@@ -70,17 +74,39 @@ def client_context(**extra_patches):
 
     patches = {
         "discover_backends": patch.object(main, "discover_backends", _mock_discover),
-        "verify_api_key": patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+        "verify_api_key_chat": patch.object(
+            chat_module, "verify_api_key", new=AsyncMock(return_value=True)
+        ),
+        "verify_api_key_messages": patch.object(
+            messages_module, "verify_api_key", new=AsyncMock(return_value=True)
+        ),
+        "verify_api_key_responses": patch.object(
+            responses_module, "verify_api_key", new=AsyncMock(return_value=True)
+        ),
+        "verify_api_key_general": patch.object(
+            general_module, "verify_api_key", new=AsyncMock(return_value=True)
+        ),
         "validate_claude_code_auth": patch.object(
             main, "validate_claude_code_auth", return_value=(True, {"method": "test"})
         ),
         "_validate_backend_auth": patch.object(main, "_validate_backend_auth"),
+        "_validate_backend_auth_chat": patch.object(chat_module, "_validate_backend_auth"),
+        "_validate_backend_auth_responses": patch.object(
+            responses_module, "validate_backend_auth_or_raise"
+        ),
+        "_validate_backend_auth_messages": patch.object(
+            messages_module, "validate_backend_auth_or_raise"
+        ),
         "start_cleanup_task": patch.object(main.session_manager, "start_cleanup_task"),
         "async_shutdown": patch.object(main.session_manager, "async_shutdown", new=AsyncMock()),
     }
 
-    with patches["discover_backends"], patches["verify_api_key"], \
+    with patches["discover_backends"], \
+         patches["verify_api_key_chat"], patches["verify_api_key_messages"], \
+         patches["verify_api_key_responses"], patches["verify_api_key_general"], \
          patches["validate_claude_code_auth"], patches["_validate_backend_auth"], \
+         patches["_validate_backend_auth_chat"], patches["_validate_backend_auth_responses"], \
+         patches["_validate_backend_auth_messages"], \
          patches["start_cleanup_task"], patches["async_shutdown"]:
         with TestClient(main.app) as client:
             yield client, mock_cli
@@ -90,7 +116,7 @@ def client_context(**extra_patches):
 
 
 def _make_resolved(backend="claude", model=DEFAULT_MODEL):
-    return main.ResolvedModel(
+    return ResolvedModel(
         public_model=model, backend=backend, provider_model=model
     )
 
@@ -239,8 +265,10 @@ class TestValidateBackendAuth:
 
     def test_auth_failure_raises_503(self):
         """Lines 466-468: validate_backend_auth returns (False, ...)."""
+        import src.routes.deps as deps_module
+
         with patch.object(
-            main,
+            deps_module,
             "validate_backend_auth",
             return_value=(False, {"errors": ["no key"], "method": "claude"}),
         ):
@@ -448,10 +476,17 @@ class TestStreamingResponsePreflightFastPath:
             },
         }
 
-        with patch.object(
-            main,
-            "_resolve_and_get_backend",
-            return_value=(_make_resolved(), mock_backend),
+        with (
+            patch.object(
+                main,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
         ):
             lines = [
                 line async for line in main.generate_streaming_response(
@@ -508,9 +543,20 @@ class TestStreamingUsageFromSdkChunks:
                 "_resolve_and_get_backend",
                 return_value=(_make_resolved(), mock_backend),
             ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
             patch.object(main, "_validate_backend_auth"),
+            patch.object(chat_module, "_validate_backend_auth"),
             patch.object(
                 main,
+                "_build_backend_options",
+                return_value={"model": DEFAULT_MODEL},
+            ),
+            patch.object(
+                chat_module,
                 "_build_backend_options",
                 return_value={"model": DEFAULT_MODEL},
             ),
@@ -576,10 +622,17 @@ class TestStreamingErrorCapturesProviderSessionId:
             stream=True,
         )
 
-        with patch.object(
-            main,
-            "_resolve_and_get_backend",
-            return_value=(_make_resolved(), mock_backend),
+        with (
+            patch.object(
+                main,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
         ):
             lines = [
                 line async for line in main.generate_streaming_response(
@@ -1285,9 +1338,20 @@ class TestStreamingResponseLegacySessionPath:
                 "_resolve_and_get_backend",
                 return_value=(_make_resolved(), mock_backend),
             ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
             patch.object(main, "_validate_backend_auth"),
+            patch.object(chat_module, "_validate_backend_auth"),
             patch.object(
                 main,
+                "_build_backend_options",
+                return_value={"model": DEFAULT_MODEL},
+            ),
+            patch.object(
+                chat_module,
                 "_build_backend_options",
                 return_value={"model": DEFAULT_MODEL},
             ),
@@ -1333,9 +1397,20 @@ class TestStreamingResponseHttpExceptionReraise:
                 "_resolve_and_get_backend",
                 return_value=(_make_resolved("claude"), mock_backend),
             ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved("claude"), mock_backend),
+            ),
             patch.object(main, "_validate_backend_auth"),
+            patch.object(chat_module, "_validate_backend_auth"),
             patch.object(
                 main,
+                "_build_backend_options",
+                return_value={"model": DEFAULT_MODEL},
+            ),
+            patch.object(
+                chat_module,
                 "_build_backend_options",
                 return_value={"model": DEFAULT_MODEL},
             ),
@@ -1495,10 +1570,12 @@ class TestDebugEndpointTopLevelException:
     def test_exception_in_body_parsing_returns_error(self):
         """Lines 1283-1284: Exception during processing returns error dict."""
         # We need to trigger an exception inside the try block.
-        # Patch request.body() to raise an exception.
+        # Patch ChatCompletionRequest on the module that uses it (general.py).
+        import src.routes.general as general_module
+
         with client_context() as (client, _mock_cli):
             with patch.object(
-                main, "ChatCompletionRequest",
+                general_module, "ChatCompletionRequest",
                 side_effect=Exception("model import error"),
             ):
                 response = client.post(
@@ -1662,9 +1739,20 @@ class TestLegacyStreamingCodexResumeGuard:
                 "_resolve_and_get_backend",
                 return_value=(resolved, fake_codex),
             ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(resolved, fake_codex),
+            ),
             patch.object(main, "_validate_backend_auth"),
+            patch.object(chat_module, "_validate_backend_auth"),
             patch.object(
                 main,
+                "_build_backend_options",
+                return_value={"model": "codex"},
+            ),
+            patch.object(
+                chat_module,
                 "_build_backend_options",
                 return_value={"model": "codex"},
             ),
@@ -1710,9 +1798,20 @@ class TestLegacyStreamingCodexResumeGuard:
                 "_resolve_and_get_backend",
                 return_value=(_make_resolved(), mock_backend),
             ),
+            patch.object(
+                chat_module,
+                "_resolve_and_get_backend",
+                return_value=(_make_resolved(), mock_backend),
+            ),
             patch.object(main, "_validate_backend_auth"),
+            patch.object(chat_module, "_validate_backend_auth"),
             patch.object(
                 main,
+                "_build_backend_options",
+                return_value={"model": DEFAULT_MODEL},
+            ),
+            patch.object(
+                chat_module,
                 "_build_backend_options",
                 return_value={"model": DEFAULT_MODEL},
             ),
@@ -1889,7 +1988,8 @@ class TestResponsesStreamingExceptionCaptureWithBuffer:
             yield {"content": [{"type": "text", "text": "ok"}]}
             yield {"subtype": "success", "result": "ok"}
 
-        original_capture = main._capture_provider_session_id
+        from src.routes.deps import capture_provider_session_id as _original_capture
+
         call_count = 0
 
         def capture_that_fails_first_time(chunks_buffer, sess):
@@ -1898,16 +1998,23 @@ class TestResponsesStreamingExceptionCaptureWithBuffer:
             if call_count == 1:
                 raise RuntimeError("capture failed on first call")
             # Second call (line 1591 in except handler) works normally
-            original_capture(chunks_buffer, sess)
+            _original_capture(chunks_buffer, sess)
 
         with client_context() as (client, mock_cli):
             mock_cli.run_completion = successful_run
             mock_cli.parse_message.return_value = "ok"
 
-            with patch.object(
-                main,
-                "_capture_provider_session_id",
-                side_effect=capture_that_fails_first_time,
+            with (
+                patch.object(
+                    main,
+                    "_capture_provider_session_id",
+                    side_effect=capture_that_fails_first_time,
+                ),
+                patch.object(
+                    responses_module,
+                    "capture_provider_session_id",
+                    side_effect=capture_that_fails_first_time,
+                ),
             ):
                 with client.stream(
                     "POST",

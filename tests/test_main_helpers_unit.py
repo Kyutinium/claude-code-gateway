@@ -12,11 +12,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import src.main as main
+import src.routes.chat as chat_module
 from src.backends.base import BackendRegistry
+from src.backend_registry import ResolvedModel
 from src.backends.claude.constants import CLAUDE_TOOLS
 from src.constants import DEFAULT_HOST, DEFAULT_MODEL, DEFAULT_PORT
 from src.models import ChatCompletionRequest, Message, StreamOptions, Usage
 from src.streaming_utils import is_assistant_content_chunk, make_sse, map_stop_reason, stream_chunks
+
+_test_logger = logging.getLogger("test")
 
 
 def _parse_chat_sse(line: str) -> dict:
@@ -179,7 +183,7 @@ async def test_stream_chunks_emits_fallback_when_no_content():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(empty_source(), request, "req-1", chunks):
+    async for line in main._stream_chunks(empty_source(), request, "req-1", chunks, _test_logger):
         streamed.append(line)
 
     assert chunks == [{"type": "metadata"}]
@@ -195,7 +199,10 @@ async def test_generate_streaming_response_returns_error_chunk_on_exception():
         stream=True,
     )
 
-    with patch.object(main, "_resolve_and_get_backend", side_effect=RuntimeError("boom")):
+    with (
+        patch.object(main, "_resolve_and_get_backend", side_effect=RuntimeError("boom")),
+        patch.object(chat_module, "_resolve_and_get_backend", side_effect=RuntimeError("boom")),
+    ):
         lines = [line async for line in main.generate_streaming_response(request, "req-2")]
 
     assert lines == ['data: {"error": {"message": "boom", "type": "streaming_error"}}\n\n']
@@ -384,7 +391,7 @@ async def test_stream_chunks_token_mode():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(token_source(), request, "req-tok", chunks):
+    async for line in main._stream_chunks(token_source(), request, "req-tok", chunks, _test_logger):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -409,7 +416,7 @@ async def test_stream_chunks_fallback_without_stream_events():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(message_source(), request, "req-fb", chunks):
+    async for line in main._stream_chunks(message_source(), request, "req-fb", chunks, _test_logger):
         streamed.append(line)
 
     assert any("response" in line for line in streamed)
@@ -438,7 +445,7 @@ async def test_stream_chunks_skips_assistant_in_token_mode():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(mixed_source(), request, "req-skip", chunks):
+    async for line in main._stream_chunks(mixed_source(), request, "req-skip", chunks, _test_logger):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -497,7 +504,7 @@ async def test_stream_chunks_thinking_with_tags():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(thinking_source(), request, "req-think", chunks):
+    async for line in main._stream_chunks(thinking_source(), request, "req-think", chunks, _test_logger):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -547,7 +554,7 @@ async def test_stream_chunks_token_mode_skips_assistantmessage_tool_use_duplicat
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(tool_use_source(), request, "req-tool", chunks):
+    async for line in main._stream_chunks(tool_use_source(), request, "req-tool", chunks, _test_logger):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -615,7 +622,7 @@ async def test_stream_chunks_token_mode_emits_tool_use_from_stream_events():
     chunks = []
     streamed = []
     async for line in main._stream_chunks(
-        tool_use_event_source(), request, "req-tool-events", chunks
+        tool_use_event_source(), request, "req-tool-events", chunks, _test_logger
     ):
         streamed.append(line)
 
@@ -1066,22 +1073,32 @@ async def test_generate_streaming_response_with_include_usage():
         }
     )
 
+    _resolved = ResolvedModel(
+        public_model="claude-sonnet-4-20250514",
+        backend="claude",
+        provider_model="claude-sonnet-4-20250514",
+    )
+
     with (
         patch.object(
             main,
             "_resolve_and_get_backend",
-            return_value=(
-                main.ResolvedModel(
-                    public_model="claude-sonnet-4-20250514",
-                    backend="claude",
-                    provider_model="claude-sonnet-4-20250514",
-                ),
-                mock_backend,
-            ),
+            return_value=(_resolved, mock_backend),
+        ),
+        patch.object(
+            chat_module,
+            "_resolve_and_get_backend",
+            return_value=(_resolved, mock_backend),
         ),
         patch.object(main, "_validate_backend_auth"),
+        patch.object(chat_module, "_validate_backend_auth"),
         patch.object(
             main,
+            "_build_backend_options",
+            return_value={"model": "claude-sonnet-4-20250514"},
+        ),
+        patch.object(
+            chat_module,
             "_build_backend_options",
             return_value={"model": "claude-sonnet-4-20250514"},
         ),
@@ -1117,22 +1134,32 @@ async def test_generate_streaming_response_without_include_usage():
         }
     )
 
+    _resolved = ResolvedModel(
+        public_model="claude-sonnet-4-20250514",
+        backend="claude",
+        provider_model="claude-sonnet-4-20250514",
+    )
+
     with (
         patch.object(
             main,
             "_resolve_and_get_backend",
-            return_value=(
-                main.ResolvedModel(
-                    public_model="claude-sonnet-4-20250514",
-                    backend="claude",
-                    provider_model="claude-sonnet-4-20250514",
-                ),
-                mock_backend,
-            ),
+            return_value=(_resolved, mock_backend),
+        ),
+        patch.object(
+            chat_module,
+            "_resolve_and_get_backend",
+            return_value=(_resolved, mock_backend),
         ),
         patch.object(main, "_validate_backend_auth"),
+        patch.object(chat_module, "_validate_backend_auth"),
         patch.object(
             main,
+            "_build_backend_options",
+            return_value={"model": "claude-sonnet-4-20250514"},
+        ),
+        patch.object(
+            chat_module,
             "_build_backend_options",
             return_value={"model": "claude-sonnet-4-20250514"},
         ),

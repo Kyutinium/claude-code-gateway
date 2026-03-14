@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import src.main as main
 import src.session_manager as session_manager_module
+import src.routes.chat as chat_module
+import src.routes.responses as responses_module
+from src.auth import auth_manager
 from src.backend_registry import BackendRegistry
 from src.session_manager import SessionManager
 
@@ -42,6 +45,7 @@ def reset_main_state():
     """Restore mutable module state and clean shared session state between tests."""
     original_debug = main.DEBUG_MODE
     original_runtime_api_key = main.runtime_api_key
+    original_auth_runtime_key = auth_manager.runtime_api_key
     original_max_request_size = main.MAX_REQUEST_SIZE
 
     # Register descriptors so resolve_model() works even after clear
@@ -51,11 +55,16 @@ def reset_main_state():
 
     main.DEBUG_MODE = original_debug
     main.runtime_api_key = original_runtime_api_key
+    auth_manager.runtime_api_key = original_auth_runtime_key
     main.MAX_REQUEST_SIZE = original_max_request_size
     BackendRegistry.clear()
 
     seen_managers = set()
-    for manager in (main.session_manager, session_manager_module.session_manager):
+    for manager in (
+        session_manager_module.session_manager,
+        chat_module.session_manager,
+        responses_module.session_manager,
+    ):
         if id(manager) in seen_managers:
             continue
         seen_managers.add(id(manager))
@@ -64,10 +73,11 @@ def reset_main_state():
 
 @pytest.fixture
 def isolated_session_manager(monkeypatch):
-    """Patch both modules to use a fresh SessionManager for a test."""
+    """Patch all modules that hold a session_manager reference to use a fresh instance."""
     manager = SessionManager(default_ttl_minutes=60, cleanup_interval_minutes=5)
-    monkeypatch.setattr(main, "session_manager", manager)
     monkeypatch.setattr(session_manager_module, "session_manager", manager)
+    monkeypatch.setattr(chat_module, "session_manager", manager)
+    monkeypatch.setattr(responses_module, "session_manager", manager)
 
     try:
         yield manager

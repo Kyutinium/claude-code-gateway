@@ -14,6 +14,11 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import src.main as main
+import src.routes.chat as chat_module
+import src.routes.messages as messages_module
+import src.routes.responses as responses_module
+import src.routes.general as general_module
+from src.auth import auth_manager
 from src.backend_registry import BackendRegistry
 from src.backends.claude.constants import CLAUDE_TOOLS
 from src.constants import DEFAULT_MODEL
@@ -44,9 +49,14 @@ def client_context():
 
     with (
         patch.object(main, "discover_backends", _mock_discover),
-        patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(chat_module, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(messages_module, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(responses_module, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(general_module, "verify_api_key", new=AsyncMock(return_value=True)),
         patch.object(main, "validate_claude_code_auth", return_value=(True, {"method": "test"})),
-        patch.object(main, "_validate_backend_auth"),
+        patch.object(chat_module, "_validate_backend_auth"),
+        patch.object(responses_module, "validate_backend_auth_or_raise"),
+        patch.object(messages_module, "validate_backend_auth_or_raise"),
         patch.object(main.session_manager, "start_cleanup_task"),
         patch.object(main.session_manager, "async_shutdown", new=AsyncMock()),
     ):
@@ -172,20 +182,19 @@ def test_chat_completions_streaming_response_with_usage():
 
 @pytest.mark.parametrize("endpoint", ["/v1/chat/completions", "/v1/messages"])
 def test_returns_503_when_auth_is_invalid(endpoint):
+    _auth_exc = HTTPException(
+        status_code=503,
+        detail={
+            "message": "claude backend authentication failed",
+            "errors": ["missing auth"],
+            "help": "Check /v1/auth/status for detailed authentication information",
+        },
+    )
     with (
         client_context() as (client, _mock_cli),
-        patch.object(
-            main,
-            "_validate_backend_auth",
-            side_effect=HTTPException(
-                status_code=503,
-                detail={
-                    "message": "claude backend authentication failed",
-                    "errors": ["missing auth"],
-                    "help": "Check /v1/auth/status for detailed authentication information",
-                },
-            ),
-        ),
+        patch.object(main, "_validate_backend_auth", side_effect=_auth_exc),
+        patch.object(chat_module, "_validate_backend_auth", side_effect=_auth_exc),
+        patch.object(messages_module, "validate_backend_auth_or_raise", side_effect=_auth_exc),
     ):
         response = client.post(
             endpoint,
@@ -236,6 +245,7 @@ def test_anthropic_messages_success():
     with (
         client_context() as (client, mock_cli),
         patch.object(main, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
+        patch.object(messages_module, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
     ):
         mock_cli.run_completion = fake_run_completion
         mock_cli.parse_message.return_value = "Anthropic answer"
@@ -264,13 +274,10 @@ def test_anthropic_messages_success():
 
 
 def test_models_compatibility_version_and_root_endpoints():
+    auth_info = {"method": "claude_cli", "status": {"valid": True}}
     with (
         client_context() as (client, _mock_cli),
-        patch.object(
-            main,
-            "get_claude_code_auth_info",
-            return_value={"method": "claude_cli", "status": {"valid": True}},
-        ),
+        patch.object(general_module, "get_claude_code_auth_info", return_value=auth_info),
     ):
         models_response = client.get("/v1/models")
         compatibility_response = client.post(
@@ -299,25 +306,23 @@ def test_models_compatibility_version_and_root_endpoints():
 
 
 def test_list_mcp_servers_filters_safe_fields():
+    mcp_return = {
+        "stdio-server": {
+            "type": "stdio",
+            "command": "demo",
+            "args": ["--flag"],
+            "secret": "ignored",
+        },
+        "remote-server": {
+            "type": "sse",
+            "url": "https://example.com/mcp",
+            "token": "ignored",
+        },
+    }
     with (
         client_context() as (client, _mock_cli),
-        patch.object(
-            main,
-            "get_mcp_servers",
-            return_value={
-                "stdio-server": {
-                    "type": "stdio",
-                    "command": "demo",
-                    "args": ["--flag"],
-                    "secret": "ignored",
-                },
-                "remote-server": {
-                    "type": "sse",
-                    "url": "https://example.com/mcp",
-                    "token": "ignored",
-                },
-            },
-        ),
+        patch.object(main, "get_mcp_servers", return_value=mcp_return),
+        patch.object(general_module, "get_mcp_servers", return_value=mcp_return),
     ):
         response = client.get("/v1/mcp/servers")
 
@@ -353,21 +358,23 @@ def test_debug_request_endpoint_reports_parse_and_validation_results():
 def test_auth_status_endpoint_uses_runtime_key_source():
     main.runtime_api_key = "runtime-key"
 
-    with (
-        client_context() as (client, _mock_cli),
-        patch.object(
-            main,
-            "get_claude_code_auth_info",
-            return_value={"method": "claude_cli", "status": {"valid": True}},
-        ),
-        patch("src.auth.auth_manager.get_api_key", return_value="runtime-key"),
-        patch.dict("os.environ", {}, clear=True),
-    ):
-        response = client.get("/v1/auth/status")
+    auth_info = {"method": "claude_cli", "status": {"valid": True}}
+    original_runtime_key = auth_manager.runtime_api_key
+    auth_manager.runtime_api_key = "runtime-key"
+    try:
+        with (
+            client_context() as (client, _mock_cli),
+            patch.object(general_module, "get_claude_code_auth_info", return_value=auth_info),
+            patch("src.auth.auth_manager.get_api_key", return_value="runtime-key"),
+            patch.dict("os.environ", {}, clear=True),
+        ):
+            response = client.get("/v1/auth/status")
 
-    assert response.status_code == 200
-    assert response.json()["server_info"]["api_key_required"] is True
-    assert response.json()["server_info"]["api_key_source"] == "runtime"
+        assert response.status_code == 200
+        assert response.json()["server_info"]["api_key_required"] is True
+        assert response.json()["server_info"]["api_key_source"] == "runtime"
+    finally:
+        auth_manager.runtime_api_key = original_runtime_key
 
 
 def test_session_endpoints_and_http_exception_handler():
@@ -436,6 +443,7 @@ def test_create_response_non_streaming_success_uses_array_system_prompt(isolated
     with (
         client_context() as (client, mock_cli),
         patch.object(main, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
+        patch.object(responses_module, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
     ):
         mock_cli.run_completion = fake_run_completion
         mock_cli.parse_message.return_value = "Responses answer"
@@ -540,20 +548,18 @@ def test_create_response_returns_404_when_previous_response_session_is_missing()
 
 
 def test_create_response_returns_503_when_auth_is_invalid():
+    auth_error = HTTPException(
+        status_code=503,
+        detail={
+            "message": "claude backend authentication failed",
+            "errors": ["missing auth"],
+            "help": "Check /v1/auth/status for detailed authentication information",
+        },
+    )
     with (
         client_context() as (client, _mock_cli),
-        patch.object(
-            main,
-            "_validate_backend_auth",
-            side_effect=HTTPException(
-                status_code=503,
-                detail={
-                    "message": "claude backend authentication failed",
-                    "errors": ["missing auth"],
-                    "help": "Check /v1/auth/status for detailed authentication information",
-                },
-            ),
-        ),
+        patch.object(main, "_validate_backend_auth", side_effect=auth_error),
+        patch.object(responses_module, "validate_backend_auth_or_raise", side_effect=auth_error),
     ):
         response = client.post(
             "/v1/responses",
@@ -790,9 +796,16 @@ def _setup_codex_backend(mock_cli, thread_id="fake-thread-123", text="codex repl
 
 
 # Helper: context manager to bypass codex auth validation
+@contextmanager
 def _bypass_codex_auth():
     """Patch _validate_backend_auth to be a no-op for codex tests."""
-    return patch.object(main, "_validate_backend_auth", return_value=None)
+    with (
+        patch.object(main, "_validate_backend_auth", return_value=None),
+        patch.object(chat_module, "_validate_backend_auth", return_value=None),
+        patch.object(responses_module, "validate_backend_auth_or_raise", return_value=None),
+        patch.object(messages_module, "validate_backend_auth_or_raise", return_value=None),
+    ):
+        yield
 
 
 # 1. test_responses_codex_streaming
@@ -1085,6 +1098,7 @@ def test_responses_claude_unchanged(isolated_session_manager):
     with (
         client_context() as (client, mock_cli),
         patch.object(main, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
+        patch.object(responses_module, "get_mcp_servers", return_value={"demo": {"type": "stdio"}}),
     ):
         mock_cli.run_completion = fake_run_completion
         mock_cli.parse_message.return_value = "Claude says hi"
@@ -1653,7 +1667,7 @@ async def test_responses_truly_concurrent_lock_serialization(isolated_session_ma
     BackendRegistry.register("claude", mock_cli)
 
     with (
-        patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(responses_module, "verify_api_key", new=AsyncMock(return_value=True)),
         _bypass_codex_auth(),
         patch.object(main, "get_mcp_servers", return_value={}),
         patch.object(main.session_manager, "start_cleanup_task"),

@@ -1,0 +1,141 @@
+"""Shared dependencies and helpers for route handlers."""
+
+import logging
+
+from fastapi import HTTPException
+
+from src.backends import (
+    BackendClient,
+    BackendRegistry,
+    resolve_model,
+    ResolvedModel,
+)
+from src.auth import validate_backend_auth
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_and_get_backend(
+    model: str,
+) -> tuple[ResolvedModel, "BackendClient"]:
+    """Resolve model -> backend and validate backend availability.
+
+    Raises HTTPException if the backend is not registered (e.g. Codex disabled).
+    """
+    resolved = resolve_model(model)
+
+    if not BackendRegistry.is_registered(resolved.backend):
+        if resolved.backend == "codex":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Codex backend is not available. Install Codex CLI to use model '{model}'."
+                ),
+            )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Backend '{resolved.backend}' for model '{model}' is not available.",
+        )
+
+    return resolved, BackendRegistry.get(resolved.backend)
+
+
+def validate_backend_auth_or_raise(backend_name: str) -> None:
+    """Validate backend authentication, raise HTTPException on failure."""
+    auth_valid, auth_info = validate_backend_auth(backend_name)
+    if not auth_valid:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": f"{backend_name} backend authentication failed",
+                "errors": auth_info.get("errors", []),
+                "help": "Check /v1/auth/status for detailed authentication information",
+            },
+        )
+
+
+def request_has_images(request) -> bool:
+    """Check if any message in the request contains image content parts."""
+    messages = getattr(request, "messages", None)
+    if not messages:
+        # Check for Responses API input
+        input_data = getattr(request, "input", None)
+        if isinstance(input_data, list):
+            for item in input_data:
+                content = getattr(item, "content", None) or (
+                    item.get("content") if isinstance(item, dict) else None
+                )
+                if isinstance(content, list):
+                    for part in content:
+                        ptype = (
+                            part.get("type")
+                            if isinstance(part, dict)
+                            else getattr(part, "type", None)
+                        )
+                        if ptype in ("image_url", "input_image", "image"):
+                            return True
+        return False
+    for msg in messages:
+        content = msg.content if hasattr(msg, "content") else None
+        if isinstance(content, list):
+            for part in content:
+                ptype = (
+                    part.type
+                    if hasattr(part, "type")
+                    else (part.get("type") if isinstance(part, dict) else None)
+                )
+                if ptype in ("image_url", "input_image", "image"):
+                    return True
+    return False
+
+
+def validate_image_request(request, backend) -> None:
+    """Validate image requests: tools must be enabled, backend must support images.
+
+    Raises HTTPException(400) on failure.
+    """
+    if not request_has_images(request):
+        return
+
+    # Check tools enabled (chat completions only has enable_tools)
+    enable_tools = getattr(request, "enable_tools", True)
+    if not enable_tools:
+        raise HTTPException(
+            status_code=400,
+            detail="Image input requires tools to be enabled (enable_tools=true) "
+            "because Claude Code uses the Read tool to process images.",
+        )
+
+    # Check backend supports images
+    if not hasattr(backend, "image_handler"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Image input is not supported for the {backend.name} backend.",
+        )
+
+
+def capture_provider_session_id(chunks_buffer: list, session) -> None:
+    """Scan chunks for a ``codex_session`` meta-event and store the thread_id."""
+    for chunk in chunks_buffer:
+        if isinstance(chunk, dict) and chunk.get("type") == "codex_session":
+            thread_id = chunk.get("session_id")
+            if thread_id and session is not None:
+                session.provider_session_id = thread_id
+                logger.debug("Captured Codex thread_id: %s", thread_id)
+            break
+
+
+def truncate_image_data(obj):
+    """Deep-copy and truncate base64 image data for safe logging."""
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            if k in ("data", "url") and isinstance(v, str) and len(v) > 200:
+                if "base64" in v[:50] or v.startswith("data:image"):
+                    result[k] = v[:50] + "...[truncated]"
+                    continue
+            result[k] = truncate_image_data(v)
+        return result
+    if isinstance(obj, list):
+        return [truncate_image_data(item) for item in obj]
+    return obj

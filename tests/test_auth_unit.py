@@ -328,20 +328,17 @@ class TestGetApiKey:
             assert src.auth.auth_manager.get_api_key() == "env-api-key"
 
     def test_runtime_api_key_takes_precedence(self):
-        """runtime_api_key in src.main should take precedence over env API_KEY."""
+        """runtime_api_key on auth_manager should take precedence over env API_KEY."""
         with patch.dict(os.environ, {"API_KEY": "env-key"}):
             import src.auth
-            import src.main as main
 
-            # Manually set runtime_api_key
-            main.runtime_api_key = "runtime-secret"
+            importlib.reload(src.auth)
+            src.auth.auth_manager.runtime_api_key = "runtime-secret"
 
             try:
-                # Reload to ensure it tries to import from main
-                importlib.reload(src.auth)
                 assert src.auth.auth_manager.get_api_key() == "runtime-secret"
             finally:
-                main.runtime_api_key = None
+                src.auth.auth_manager.runtime_api_key = None
 
     def test_returns_runtime_key_when_available(self):
         """Returns runtime key when set in main module."""

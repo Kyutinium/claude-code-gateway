@@ -48,8 +48,7 @@ class ImageHandler:
         image_bytes = base64.b64decode(data)
         if len(image_bytes) > MAX_IMAGE_SIZE:
             raise ValueError(
-                f"Image size {len(image_bytes)} bytes exceeds "
-                f"{MAX_IMAGE_SIZE} byte limit"
+                f"Image size {len(image_bytes)} bytes exceeds {MAX_IMAGE_SIZE} byte limit"
             )
 
         content_hash = hashlib.sha256(image_bytes).hexdigest()[:16]
@@ -73,9 +72,7 @@ class ImageHandler:
         Raises ``ValueError`` for non-data URLs or malformed payloads.
         """
         if not data_url.startswith("data:"):
-            raise ValueError(
-                "Only data: URLs are supported for images (remote URLs not supported)"
-            )
+            raise ValueError("Only data: URLs are supported for images (remote URLs not supported)")
         header, sep, b64data = data_url.partition(",")
         if not sep or not b64data:
             raise ValueError("Malformed data URL: missing base64 payload")

@@ -90,6 +90,7 @@ else:
     )
     CLAUDE_SANDBOX_ENABLED = None
 
+
 def _parse_sandbox_bool(name: str, default: str) -> bool:
     """Parse a sandbox boolean env var with strict validation.
 
@@ -110,14 +111,10 @@ def _parse_sandbox_bool(name: str, default: str) -> bool:
     return default.lower() in _SANDBOX_VALID_TRUE
 
 
-CLAUDE_SANDBOX_AUTO_ALLOW_BASH: bool = _parse_sandbox_bool(
-    "CLAUDE_SANDBOX_AUTO_ALLOW_BASH", "true"
-)
+CLAUDE_SANDBOX_AUTO_ALLOW_BASH: bool = _parse_sandbox_bool("CLAUDE_SANDBOX_AUTO_ALLOW_BASH", "true")
 
 CLAUDE_SANDBOX_EXCLUDED_COMMANDS: list[str] = [
-    c.strip()
-    for c in os.getenv("CLAUDE_SANDBOX_EXCLUDED_COMMANDS", "").split(",")
-    if c.strip()
+    c.strip() for c in os.getenv("CLAUDE_SANDBOX_EXCLUDED_COMMANDS", "").split(",") if c.strip()
 ]
 
 CLAUDE_SANDBOX_ALLOW_UNSANDBOXED: bool = _parse_sandbox_bool(
@@ -128,6 +125,4 @@ CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL: bool = _parse_sandbox_bool(
     "CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", "false"
 )
 
-CLAUDE_SANDBOX_WEAKER_NESTED: bool = _parse_sandbox_bool(
-    "CLAUDE_SANDBOX_WEAKER_NESTED", "false"
-)
+CLAUDE_SANDBOX_WEAKER_NESTED: bool = _parse_sandbox_bool("CLAUDE_SANDBOX_WEAKER_NESTED", "false")

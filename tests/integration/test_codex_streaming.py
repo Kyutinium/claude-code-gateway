@@ -379,8 +379,8 @@ async def test_http_streaming_e2e_with_mock_codex(mock_codex_bin, tmp_path, monk
 
         # Bypass auth: verify_api_key and _validate_backend_auth
         with (
-            patch("src.main.verify_api_key", new_callable=AsyncMock),
-            patch("src.main._validate_backend_auth"),
+            patch("src.routes.chat.verify_api_key", new_callable=AsyncMock),
+            patch("src.routes.chat._validate_backend_auth"),
         ):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

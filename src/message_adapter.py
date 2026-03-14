@@ -135,9 +135,7 @@ class MessageAdapter:
                     image_url = (
                         item.image_url
                         if hasattr(item, "image_url")
-                        else (
-                            item.get("image_url", {}) if isinstance(item, dict) else {}
-                        )
+                        else (item.get("image_url", {}) if isinstance(item, dict) else {})
                     )
                     if image_url:
                         path = image_handler.save_openai_image(image_url)

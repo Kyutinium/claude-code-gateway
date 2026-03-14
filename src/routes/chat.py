@@ -1,0 +1,559 @@
+"""Chat completions endpoint (/v1/chat/completions)."""
+
+import json
+import logging
+import os
+from typing import Optional, AsyncGenerator, Dict, Any
+
+from fastapi import APIRouter, HTTPException, Request, Depends
+from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
+
+from src.models import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    Choice,
+    Message,
+    Usage,
+)
+from src.message_adapter import MessageAdapter
+from src.auth import verify_api_key, security
+from src.parameter_validator import ParameterValidator, CompatibilityReporter
+from src.session_manager import session_manager
+from src.backends import BackendConfigError, BackendRegistry, ResolvedModel
+from src.rate_limiter import rate_limit_endpoint
+from src.constants import DEFAULT_MAX_TURNS
+from src import streaming_utils
+from src.routes.deps import (
+    resolve_and_get_backend as _resolve_and_get_backend,
+    validate_backend_auth_or_raise as _validate_backend_auth,
+    validate_image_request as _validate_image_request,
+    request_has_images as _request_has_images,
+    capture_provider_session_id as _capture_provider_session_id,
+)
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+
+def _build_backend_options(
+    request: ChatCompletionRequest,
+    resolved: ResolvedModel,
+    claude_headers: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build backend-agnostic options from request, resolved model, and headers.
+
+    Delegates to the backend's ``build_options()`` method and translates
+    ``BackendConfigError`` into ``HTTPException``.
+    """
+    backend = BackendRegistry.get(resolved.backend)
+    try:
+        return backend.build_options(request, resolved, overrides=claude_headers)
+    except BackendConfigError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+
+def _prepare_stateless_completion(messages: list, claude_options: Dict[str, Any]) -> tuple:
+    """Prepare prompt and run_completion kwargs for stateless mode.
+
+    Returns:
+        (prompt, run_kwargs) tuple
+    """
+    prompt, system_prompt = MessageAdapter.messages_to_prompt(messages)
+    prompt = MessageAdapter.filter_content(prompt)
+    if system_prompt:
+        system_prompt = MessageAdapter.filter_content(system_prompt)
+
+    run_kwargs = dict(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        model=claude_options.get("model"),
+        max_turns=claude_options.get("max_turns", DEFAULT_MAX_TURNS),
+        allowed_tools=claude_options.get("allowed_tools"),
+        disallowed_tools=claude_options.get("disallowed_tools"),
+        permission_mode=claude_options.get("permission_mode"),
+        output_format=claude_options.get("output_format"),
+        mcp_servers=claude_options.get("mcp_servers"),
+    )
+    return prompt, run_kwargs
+
+
+def _prepare_session_prompt(
+    request: ChatCompletionRequest,
+    backend=None,
+) -> tuple:
+    """Prepare prompt, system_prompt, and session for session-mode requests.
+
+    IMPORTANT: This function does NOT mutate session state and does NOT
+    compute ``is_new``.  The ``is_new`` check must happen inside the
+    per-session lock to prevent two concurrent first-turn requests from
+    both seeing ``is_new=True``.  Callers must call
+    ``session.add_messages()`` explicitly after acquiring the lock.
+
+    Returns:
+        (prompt, system_prompt, session) tuple
+    """
+    session = session_manager.get_or_create_session(request.session_id)
+
+    last_user_msg = None
+    for msg in reversed(request.messages):
+        if msg.role == "user":
+            if isinstance(msg.content, list) and backend and hasattr(backend, "image_handler"):
+                last_user_msg = MessageAdapter.extract_images_to_prompt(
+                    msg.content, backend.image_handler
+                )
+            else:
+                last_user_msg = msg.content
+            break
+    prompt = last_user_msg or MessageAdapter.messages_to_prompt(request.messages)[0]
+
+    # Extract system prompt from messages
+    system_prompt = None
+    for msg in request.messages:
+        if msg.role == "system":
+            if isinstance(msg.content, str):
+                system_prompt = msg.content
+            elif isinstance(msg.content, list):
+                system_prompt = " ".join(
+                    p.text
+                    for p in msg.content
+                    if hasattr(p, "type") and p.type == "text" and hasattr(p, "text")
+                )
+            break
+    if system_prompt:
+        system_prompt = MessageAdapter.filter_content(system_prompt)
+
+    return prompt, system_prompt, session
+
+
+async def _streaming_session_preflight(
+    request: ChatCompletionRequest,
+    resolved,
+    backend,
+    options: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run session guards and mutation BEFORE StreamingResponse is created.
+
+    This ensures HTTPException (400 backend mismatch, 409 Codex resume guard)
+    is raised while the endpoint can still return a proper HTTP error status,
+    rather than inside the async generator where Starlette has already committed
+    the 200 status line.
+
+    Returns a dict with keys needed by the streaming generator:
+        session, lock_acquired, prompt, sys_prompt, is_new, resume_id, chunk_kwargs
+    """
+    prompt, sys_prompt, session = _prepare_session_prompt(request, backend=backend)
+
+    # Acquire per-session lock BEFORE checking is_new or mutating state.
+    await session.lock.acquire()
+
+    try:
+        is_new = len(session.messages) == 0
+
+        # Enforce backend invariant (inside lock to avoid TOCTOU)
+        if not is_new and session.backend != resolved.backend:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Session '{request.session_id}' belongs to backend '{session.backend}', "
+                    f"but model '{request.model}' resolves to '{resolved.backend}'. "
+                    f"Cannot mix backends within a session."
+                ),
+            )
+
+        # Compute resume token BEFORE mutating session state
+        resume_id = None
+        if not is_new:
+            if resolved.backend == "codex" and not session.provider_session_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Cannot resume Codex session '{request.session_id}': "
+                        f"the previous turn did not return a thread_id. "
+                        f"Start a new session instead."
+                    ),
+                )
+            resume_id = session.provider_session_id or request.session_id
+
+        # Commit messages and tag backend AFTER all checks pass
+        session.add_messages(request.messages)
+        if is_new:
+            session.backend = resolved.backend
+
+    except Exception:
+        # On any failure, release the lock before re-raising
+        session.lock.release()
+        raise
+
+    return {
+        "session": session,
+        "lock_acquired": True,
+        "prompt": prompt,
+        "sys_prompt": sys_prompt,
+        "is_new": is_new,
+        "resume_id": resume_id,
+        "chunk_kwargs": dict(
+            prompt=prompt,
+            model=options.get("model"),
+            system_prompt=sys_prompt if is_new else None,
+            permission_mode=options.get("permission_mode"),
+            mcp_servers=options.get("mcp_servers"),
+            allowed_tools=options.get("allowed_tools"),
+            disallowed_tools=options.get("disallowed_tools"),
+            output_format=options.get("output_format"),
+            max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+            session_id=request.session_id if is_new else None,
+            resume=resume_id,
+            stream=True,
+        ),
+    }
+
+
+async def generate_streaming_response(
+    request: ChatCompletionRequest,
+    request_id: str,
+    claude_headers: Optional[Dict[str, Any]] = None,
+    *,
+    preflight: Optional[Dict[str, Any]] = None,
+) -> AsyncGenerator[str, None]:
+    """Generate SSE formatted streaming response via backend dispatch.
+
+    If ``preflight`` is provided (from ``_streaming_session_preflight``), the
+    generator skips session guards and uses the pre-validated state directly.
+    The caller is responsible for having run preflight before creating the
+    StreamingResponse so that HTTPExceptions surface as proper HTTP errors.
+    """
+    session = None
+    lock_acquired = False
+    chunks_buffer: list = []
+    try:
+        resolved, backend = _resolve_and_get_backend(request.model)
+
+        if request.session_id and preflight is not None:
+            # Fast path: use pre-validated session state from preflight.
+            # Adopt lock ownership FIRST so finally can release on any failure.
+            session = preflight["session"]
+            lock_acquired = preflight["lock_acquired"]
+            prompt = preflight["prompt"]
+            chunk_source = backend.run_completion(**preflight["chunk_kwargs"])
+        elif request.session_id:
+            # Legacy path (direct calls without preflight, e.g. tests)
+            _validate_backend_auth(resolved.backend)
+            options = _build_backend_options(request, resolved, claude_headers)
+            prompt, sys_prompt, session = _prepare_session_prompt(request, backend=backend)
+
+            await session.lock.acquire()
+            lock_acquired = True
+
+            is_new = len(session.messages) == 0
+
+            if not is_new and session.backend != resolved.backend:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Session '{request.session_id}' belongs to backend "
+                        f"'{session.backend}', but model '{request.model}' resolves "
+                        f"to '{resolved.backend}'. Cannot mix backends within a session."
+                    ),
+                )
+
+            resume_id = None
+            if not is_new:
+                if resolved.backend == "codex" and not session.provider_session_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Cannot resume Codex session '{request.session_id}': "
+                            f"the previous turn did not return a thread_id. "
+                            f"Start a new session instead."
+                        ),
+                    )
+                resume_id = session.provider_session_id or request.session_id
+
+            session.add_messages(request.messages)
+            if is_new:
+                session.backend = resolved.backend
+
+            chunk_source = backend.run_completion(
+                prompt=prompt,
+                model=options.get("model"),
+                system_prompt=sys_prompt if is_new else None,
+                permission_mode=options.get("permission_mode"),
+                mcp_servers=options.get("mcp_servers"),
+                allowed_tools=options.get("allowed_tools"),
+                disallowed_tools=options.get("disallowed_tools"),
+                output_format=options.get("output_format"),
+                max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+                session_id=request.session_id if is_new else None,
+                resume=resume_id,
+                stream=True,
+            )
+        else:
+            # Stateless mode
+            _validate_backend_auth(resolved.backend)
+            options = _build_backend_options(request, resolved, claude_headers)
+            prompt, run_kwargs = _prepare_stateless_completion(request.messages, options)
+            chunk_source = backend.run_completion(**run_kwargs, stream=True)
+
+        # Stream chunks using shared SSE logic
+        chunks_buffer = []
+        try:
+            async for sse_line in streaming_utils.stream_chunks(
+                chunk_source=chunk_source,
+                request=request,
+                request_id=request_id,
+                chunks_buffer=chunks_buffer,
+                logger=logger,
+            ):
+                yield sse_line
+        finally:
+            # Close the SDK generator in the same task that iterated it.
+            # The SDK uses anyio cancel scopes internally; closing from a
+            # different task (e.g. Starlette response teardown) causes
+            # "Attempted to exit cancel scope in a different task".
+            await chunk_source.aclose()
+
+        # Capture provider session id (e.g. Codex thread_id) from meta-events
+        if session is not None:
+            _capture_provider_session_id(chunks_buffer, session)
+
+        # Extract assistant response from all chunks
+        assistant_content = None
+        if chunks_buffer:
+            assistant_content = backend.parse_message(chunks_buffer)
+
+            # Store in session if applicable
+            actual_session_id = request.session_id
+            if actual_session_id and assistant_content:
+                assistant_message = Message(role="assistant", content=assistant_content)
+                session_manager.add_assistant_response(actual_session_id, assistant_message)
+
+        # Prepare usage data if requested (prefer real SDK values)
+        usage_data = None
+        if request.stream_options and request.stream_options.include_usage:
+            sdk_usage = streaming_utils.extract_sdk_usage(chunks_buffer)
+            if sdk_usage:
+                token_usage = sdk_usage
+            else:
+                completion_text = assistant_content or ""
+                token_usage = backend.estimate_token_usage(prompt, completion_text, request.model)
+            usage_data = Usage(
+                prompt_tokens=token_usage["prompt_tokens"],
+                completion_tokens=token_usage["completion_tokens"],
+                total_tokens=token_usage["total_tokens"],
+            )
+            logger.debug(f"Usage: {usage_data}")
+
+        # Extract stop_reason from SDK messages and map to OpenAI finish_reason
+        sdk_stop_reason = streaming_utils.extract_stop_reason(chunks_buffer)
+        finish_reason = streaming_utils.map_stop_reason(sdk_stop_reason)
+
+        # Send final chunk with finish reason and optionally usage data
+        yield streaming_utils.make_sse(
+            request_id, request.model, {}, finish_reason=finish_reason, usage=usage_data
+        )
+        yield "data: [DONE]\n\n"
+
+    except HTTPException:
+        raise  # Let FastAPI handle these
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        # Capture provider_session_id from partial chunks on mid-stream failure
+        # so the Codex thread_id is not lost for future resume attempts.
+        if session is not None and chunks_buffer:
+            _capture_provider_session_id(chunks_buffer, session)
+        error_chunk = {"error": {"message": str(e), "type": "streaming_error"}}
+        yield f"data: {json.dumps(error_chunk)}\n\n"
+    finally:
+        # Release per-session lock only if THIS coroutine acquired it
+        if lock_acquired:
+            session.lock.release()
+
+
+@router.post("/v1/chat/completions")
+@rate_limit_endpoint("chat")
+async def chat_completions(
+    request_body: ChatCompletionRequest,
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """OpenAI-compatible chat completions endpoint with backend dispatch."""
+    await verify_api_key(request, credentials)
+
+    try:
+        # Resolve model -> backend and validate auth
+        resolved, backend = _resolve_and_get_backend(request_body.model)
+        _validate_backend_auth(resolved.backend)
+        _validate_image_request(request_body, backend)
+
+        request_id = f"chatcmpl-{os.urandom(8).hex()}"
+
+        # Extract Claude-specific parameters from headers
+        claude_headers = ParameterValidator.extract_claude_headers(dict(request.headers))
+
+        # Log compatibility info
+        if logger.isEnabledFor(logging.DEBUG):
+            compatibility_report = CompatibilityReporter.generate_compatibility_report(request_body)
+            logger.debug(f"Compatibility report: {compatibility_report}")
+
+        if request_body.stream:
+            # Run session preflight BEFORE creating StreamingResponse so that
+            # HTTPExceptions (400 backend mismatch, 409 Codex guard) surface
+            # as proper HTTP error status codes instead of being swallowed
+            # inside the async generator after the 200 status line is committed.
+            preflight = None
+            if request_body.session_id:
+                options = _build_backend_options(request_body, resolved, claude_headers)
+                preflight = await _streaming_session_preflight(
+                    request_body, resolved, backend, options
+                )
+
+            return StreamingResponse(
+                generate_streaming_response(
+                    request_body, request_id, claude_headers, preflight=preflight
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
+        else:
+            # Non-streaming response
+            options = _build_backend_options(request_body, resolved, claude_headers)
+
+            session = None
+            if request_body.session_id:
+                prompt, sys_prompt, session = _prepare_session_prompt(request_body, backend=backend)
+
+                # Acquire lock BEFORE is_new check to prevent concurrent first-turn race
+                async with session.lock:
+                    is_new = len(session.messages) == 0
+
+                    # Enforce backend invariant (inside lock to avoid TOCTOU)
+                    if not is_new and session.backend != resolved.backend:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Session '{request_body.session_id}' belongs to backend "
+                                f"'{session.backend}', but model '{request_body.model}' "
+                                f"resolves to '{resolved.backend}'. "
+                                f"Cannot mix backends within a session."
+                            ),
+                        )
+
+                    # Compute resume token BEFORE mutating session state
+                    resume_id = None
+                    if not is_new:
+                        if resolved.backend == "codex" and not session.provider_session_id:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=(
+                                    f"Cannot resume Codex session "
+                                    f"'{request_body.session_id}': the previous turn "
+                                    f"did not return a thread_id. "
+                                    f"Start a new session instead."
+                                ),
+                            )
+                        resume_id = session.provider_session_id or request_body.session_id
+
+                    # Commit messages and tag backend AFTER all checks pass
+                    session.add_messages(request_body.messages)
+                    if is_new:
+                        session.backend = resolved.backend
+
+                    chunks = []
+                    async for chunk in backend.run_completion(
+                        prompt=prompt,
+                        model=options.get("model"),
+                        system_prompt=sys_prompt if is_new else None,
+                        permission_mode=options.get("permission_mode"),
+                        mcp_servers=options.get("mcp_servers"),
+                        allowed_tools=options.get("allowed_tools"),
+                        disallowed_tools=options.get("disallowed_tools"),
+                        output_format=options.get("output_format"),
+                        max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+                        session_id=request_body.session_id if is_new else None,
+                        resume=resume_id,
+                        stream=False,
+                    ):
+                        chunks.append(chunk)
+
+                    # Capture provider session id + store assistant response
+                    # inside lock to prevent stale reads between requests
+                    _capture_provider_session_id(chunks, session)
+
+                    raw_assistant_content = backend.parse_message(chunks)
+                    if raw_assistant_content:
+                        assistant_message = Message(role="assistant", content=raw_assistant_content)
+                        session_manager.add_assistant_response(
+                            request_body.session_id, assistant_message
+                        )
+            else:
+                prompt, run_kwargs = _prepare_stateless_completion(request_body.messages, options)
+                # Materialize images in prompt if present
+                if _request_has_images(request_body) and hasattr(backend, "image_handler"):
+                    for msg in request_body.messages:
+                        if msg.role == "user" and isinstance(msg.content, list):
+                            prompt = MessageAdapter.extract_images_to_prompt(
+                                msg.content, backend.image_handler
+                            )
+                            run_kwargs["prompt"] = prompt
+                            break
+
+                logger.info(
+                    f"Chat completion: session_id=None, total_messages={len(request_body.messages)}"
+                )
+
+                chunks = []
+                async for chunk in backend.run_completion(**run_kwargs, stream=False):
+                    chunks.append(chunk)
+
+                raw_assistant_content = backend.parse_message(chunks)
+
+            # Extract assistant message
+            if not raw_assistant_content:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"No response from {resolved.backend} backend",
+                )
+
+            assistant_content = raw_assistant_content
+
+            # Token usage (prefer real SDK values)
+            sdk_usage = streaming_utils.extract_sdk_usage(chunks)
+            if sdk_usage:
+                prompt_tokens = sdk_usage["prompt_tokens"]
+                completion_tokens = sdk_usage["completion_tokens"]
+            else:
+                prompt_tokens = MessageAdapter.estimate_tokens(prompt)
+                completion_tokens = MessageAdapter.estimate_tokens(assistant_content)
+
+            # Extract stop_reason from SDK messages and map to OpenAI finish_reason
+            sdk_stop_reason = streaming_utils.extract_stop_reason(chunks)
+            finish_reason = streaming_utils.map_stop_reason(sdk_stop_reason)
+
+            response = ChatCompletionResponse(
+                id=request_id,
+                model=request_body.model,
+                choices=[
+                    Choice(
+                        index=0,
+                        message=Message(role="assistant", content=assistant_content),
+                        finish_reason=finish_reason,
+                    )
+                ],
+                usage=Usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                ),
+            )
+
+            return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Chat completion error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

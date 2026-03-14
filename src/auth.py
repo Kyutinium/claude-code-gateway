@@ -83,6 +83,7 @@ class ClaudeCodeAuthManager:
 
     def __init__(self):
         self.env_api_key = os.getenv("API_KEY")  # Environment API key
+        self.runtime_api_key = None  # Set at startup by run_server()
 
         # Delegate Claude auth to the provider (lazy import to break circular dep)
         _ClaudeAuthProvider = _get_claude_auth_provider_class()
@@ -130,16 +131,8 @@ class ClaudeCodeAuthManager:
 
     def get_api_key(self):
         """Get the active API key (environment or runtime-generated)."""
-        # Try to import runtime_api_key from main module
-        try:
-            from src import main
-
-            if hasattr(main, "runtime_api_key") and main.runtime_api_key:
-                return main.runtime_api_key
-        except ImportError:
-            pass
-
-        # Fall back to environment variable
+        if self.runtime_api_key:
+            return self.runtime_api_key
         return self.env_api_key
 
     # ------------------------------------------------------------------

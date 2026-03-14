@@ -99,7 +99,11 @@ def mock_backend_dispatch(mock_run, parse_return="response"):
             "src.main._resolve_and_get_backend",
             return_value=(resolved, mock_backend),
         ),
-        patch("src.main._validate_backend_auth"),
+        patch(
+            "src.routes.chat._resolve_and_get_backend",
+            return_value=(resolved, mock_backend),
+        ),
+        patch("src.routes.chat._validate_backend_auth"),
         patch("src.backends.claude.client.get_mcp_servers", return_value={}),
     ):
         yield mock_backend
@@ -213,17 +217,19 @@ class TestSessionRouting:
 
         _attach_build_options(mock_backend)
 
+        _resolved = ResolvedModel(
+            public_model=DEFAULT_MODEL, backend="claude", provider_model=DEFAULT_MODEL
+        )
         with (
             patch(
                 "src.main._resolve_and_get_backend",
-                return_value=(
-                    ResolvedModel(
-                        public_model=DEFAULT_MODEL, backend="claude", provider_model=DEFAULT_MODEL
-                    ),
-                    mock_backend,
-                ),
+                return_value=(_resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(_resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
             patch("src.backends.claude.client.get_mcp_servers", return_value={}),
         ):
             from src.main import generate_streaming_response
@@ -265,22 +271,26 @@ class TestAsyncShutdownIntegration:
     @pytest.mark.asyncio
     async def test_lifespan_calls_async_shutdown(self):
         """Lifespan shutdown calls session_manager.async_shutdown()."""
-        with patch("src.main.session_manager") as mock_sm:
-            mock_sm.start_cleanup_task = MagicMock()
-            mock_sm.async_shutdown = AsyncMock()
+        mock_sm = MagicMock()
+        mock_sm.start_cleanup_task = MagicMock()
+        mock_sm.async_shutdown = AsyncMock()
 
-            with patch(
+        with (
+            patch("src.main.session_manager", mock_sm),
+            patch("src.routes.chat.session_manager", mock_sm),
+            patch(
                 "src.main.validate_claude_code_auth",
                 return_value=(True, {"method": "test"}),
-            ):
-                with patch("src.main.discover_backends"):
-                    with patch("src.main._verify_backends", new_callable=AsyncMock):
-                        from src.main import lifespan, app
+            ),
+            patch("src.main.discover_backends"),
+            patch("src.main._verify_backends", new_callable=AsyncMock),
+        ):
+            from src.main import lifespan, app
 
-                        async with lifespan(app):
-                            pass
+            async with lifespan(app):
+                pass
 
-                        mock_sm.async_shutdown.assert_called_once()
+            mock_sm.async_shutdown.assert_called_once()
 
 
 class TestNonStreamingSessionRequest:
@@ -312,9 +322,13 @@ class TestNonStreamingSessionRequest:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch("src.main.verify_api_key", new_callable=AsyncMock),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.verify_api_key", new_callable=AsyncMock),
         ):
             from src.main import app
             from httpx import AsyncClient, ASGITransport
@@ -376,9 +390,13 @@ class TestNonStreamingSessionRequest:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch("src.main.verify_api_key", new_callable=AsyncMock),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.verify_api_key", new_callable=AsyncMock),
         ):
             from src.main import app
             from httpx import AsyncClient, ASGITransport
@@ -433,9 +451,13 @@ class TestNonStreamingSessionRequest:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch("src.main.verify_api_key", new_callable=AsyncMock),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.verify_api_key", new_callable=AsyncMock),
         ):
             from src.main import app
             from httpx import AsyncClient, ASGITransport
@@ -579,9 +601,13 @@ class TestAssistantResponseStoredInSession:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch("src.main.session_manager") as mock_sm,
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.session_manager") as mock_sm,
         ):
             # get_or_create_session must return a mock session
             mock_session = MagicMock()
@@ -636,9 +662,13 @@ class TestAssistantResponseStoredInSession:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch("src.main.session_manager") as mock_sm,
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.session_manager") as mock_sm,
         ):
             from src.main import generate_streaming_response
             from src.models import ChatCompletionRequest, Message
@@ -777,8 +807,12 @@ class TestMultipleSessionsIsolation:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
         ):
             from src.models import ChatCompletionRequest, Message
 
@@ -858,9 +892,15 @@ class TestMultipleSessionsIsolation:
         )
 
         # Request B: fails inside try, should NOT release A's lock
-        with patch(
-            "src.main._resolve_and_get_backend",
-            side_effect=ValueError("forced failure"),
+        with (
+            patch(
+                "src.main._resolve_and_get_backend",
+                side_effect=ValueError("forced failure"),
+            ),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                side_effect=ValueError("forced failure"),
+            ),
         ):
             chunks = []
             async for chunk in generate_streaming_response(req, "req-lock-test"):
@@ -919,8 +959,12 @@ class TestMixedBackendSessionInvariant:
                 "src.main._resolve_and_get_backend",
                 return_value=(codex_resolved, mock_codex_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, mock_codex_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
         ):
             second_req = ChatCompletionRequest(
                 model="codex",
@@ -961,15 +1005,21 @@ class TestMixedBackendSessionInvariant:
 
         import src.main as main
 
+        _mock_codex = MagicMock()
         with (
             patch.object(
                 main,
                 "_resolve_and_get_backend",
-                return_value=(codex_resolved, MagicMock()),
+                return_value=(codex_resolved, _mock_codex),
+            ),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, _mock_codex),
             ),
             patch.object(main, "_validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
-            patch.object(main, "verify_api_key", new_callable=AsyncMock),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
+            patch("src.routes.chat.verify_api_key", new_callable=AsyncMock),
         ):
             from httpx import AsyncClient, ASGITransport
 
@@ -1040,8 +1090,12 @@ class TestConcurrentFirstTurnRace:
                 "src.main._resolve_and_get_backend",
                 return_value=(resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
         ):
             req_a = ChatCompletionRequest(
                 model=DEFAULT_MODEL,
@@ -1118,8 +1172,12 @@ class TestCodexProviderSessionIdFallback:
                 "src.main._resolve_and_get_backend",
                 return_value=(codex_resolved, mock_codex_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, mock_codex_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
         ):
             second_req = ChatCompletionRequest(
                 model="codex",
@@ -1196,8 +1254,12 @@ class TestCodex409GuardSessionPollution:
                 "src.main._resolve_and_get_backend",
                 return_value=(codex_resolved, mock_codex),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, mock_codex),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
         ):
             req = ChatCompletionRequest(
                 model="codex",
@@ -1232,11 +1294,15 @@ class TestCodex409GuardSessionPollution:
                 "src.main._resolve_and_get_backend",
                 return_value=(codex_resolved, mock_codex),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, mock_codex),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
             patch("src.main.discover_backends"),
             patch("src.main._verify_backends"),
-            patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+            patch("src.routes.chat.verify_api_key", new=AsyncMock(return_value=True)),
             patch.object(
                 main,
                 "validate_claude_code_auth",
@@ -1288,11 +1354,15 @@ class TestStreamingPreflightHTTPStatus:
                 "src.main._resolve_and_get_backend",
                 return_value=(claude_resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(claude_resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
             patch("src.main.discover_backends"),
             patch("src.main._verify_backends"),
-            patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+            patch("src.routes.chat.verify_api_key", new=AsyncMock(return_value=True)),
             patch.object(
                 main,
                 "validate_claude_code_auth",
@@ -1334,11 +1404,15 @@ class TestStreamingPreflightHTTPStatus:
                 "src.main._resolve_and_get_backend",
                 return_value=(codex_resolved, mock_backend),
             ),
-            patch("src.main._validate_backend_auth"),
-            patch("src.main._build_backend_options", return_value={"model": "sonnet"}),
+            patch(
+                "src.routes.chat._resolve_and_get_backend",
+                return_value=(codex_resolved, mock_backend),
+            ),
+            patch("src.routes.chat._validate_backend_auth"),
+            patch("src.routes.chat._build_backend_options", return_value={"model": "sonnet"}),
             patch("src.main.discover_backends"),
             patch("src.main._verify_backends"),
-            patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+            patch("src.routes.chat.verify_api_key", new=AsyncMock(return_value=True)),
             patch.object(
                 main,
                 "validate_claude_code_auth",

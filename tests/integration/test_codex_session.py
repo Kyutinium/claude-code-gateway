@@ -346,8 +346,8 @@ class TestConcurrentLockContention:
 
         with (
             patch.object(main, "runtime_api_key", None),
-            patch("src.main.verify_api_key", return_value=True),
-            patch("src.main._validate_backend_auth"),
+            patch("src.routes.chat.verify_api_key", return_value=True),
+            patch("src.routes.chat._validate_backend_auth"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=main.app),
@@ -403,8 +403,8 @@ class TestConcurrentLockContention:
 
         with (
             patch.object(main, "runtime_api_key", None),
-            patch("src.main.verify_api_key", return_value=True),
-            patch("src.main._validate_backend_auth"),
+            patch("src.routes.chat.verify_api_key", return_value=True),
+            patch("src.routes.chat._validate_backend_auth"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=main.app),
@@ -461,8 +461,8 @@ class TestBackendInvariantApiLevel:
 
         with (
             patch.object(main, "runtime_api_key", None),
-            patch("src.main.verify_api_key", return_value=True),
-            patch("src.main._validate_backend_auth"),
+            patch("src.routes.chat.verify_api_key", return_value=True),
+            patch("src.routes.chat._validate_backend_auth"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=main.app),
@@ -550,8 +550,8 @@ class TestE2eHttpSessionFlow:
 
         with (
             patch.object(main, "runtime_api_key", None),
-            patch("src.main.verify_api_key", return_value=True),
-            patch("src.main._validate_backend_auth"),
+            patch("src.routes.chat.verify_api_key", return_value=True),
+            patch("src.routes.chat._validate_backend_auth"),
         ):
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=main.app),

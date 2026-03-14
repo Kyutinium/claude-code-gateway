@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import src.main as main
+import src.routes.chat as chat_module
 from src.backend_registry import BackendRegistry
 from src.constants import DEFAULT_MODEL
 from src.main import _request_has_images, _validate_image_request, _truncate_image_data
@@ -78,9 +79,10 @@ def client_context():
 
     with (
         patch.object(main, "discover_backends", _mock_discover),
-        patch.object(main, "verify_api_key", new=AsyncMock(return_value=True)),
+        patch.object(chat_module, "verify_api_key", new=AsyncMock(return_value=True)),
         patch.object(main, "validate_claude_code_auth", return_value=(True, {"method": "test"})),
         patch.object(main, "_validate_backend_auth"),
+        patch.object(chat_module, "_validate_backend_auth"),
         patch.object(main.session_manager, "start_cleanup_task"),
         patch.object(main.session_manager, "async_shutdown", new=AsyncMock()),
     ):
