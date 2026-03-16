@@ -340,7 +340,8 @@ class Pipe:
                         event_json = json.dumps(event, indent=2, ensure_ascii=False)
                         # Use 4-backtick fence so triple backticks in content don't break it
                         yield (
-                            f"\n\n<details>\n<summary>🔧 {escaped_name}</summary>\n\n"
+                            f"\n\n<details>\n<summary>🔧 View Request"
+                            f" from {escaped_name}</summary>\n\n"
                             f"````json\n{event_json}\n````\n\n</details>\n"
                         )
 
@@ -349,9 +350,9 @@ class Pipe:
                         is_error = event.get("is_error", False)
                         tool_name = tool_names.get(tool_id, "")
                         prefix = "❌" if is_error else "📎"
-                        label = f"{prefix} Result"
+                        label = f"{prefix} View Result"
                         if tool_name:
-                            label += f" ({html.escape(tool_name)})"
+                            label += f" from {html.escape(tool_name)}"
                         result_text = str(event.get("content", ""))[:500]
                         yield (
                             f"\n<details>\n<summary>{label}</summary>\n\n"
