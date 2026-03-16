@@ -10,6 +10,7 @@ license: MIT
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 from typing import AsyncGenerator
@@ -335,10 +336,12 @@ class Pipe:
                         name = event.get("name", "")
                         if tool_id:
                             tool_names[tool_id] = name
+                        escaped_name = html.escape(name)
                         event_json = json.dumps(event, indent=2, ensure_ascii=False)
+                        # Use 4-backtick fence so triple backticks in content don't break it
                         yield (
-                            f"\n\n<details>\n<summary>🔧 {name}</summary>\n\n"
-                            f"```json\n{event_json}\n```\n\n</details>\n"
+                            f"\n\n<details>\n<summary>🔧 {escaped_name}</summary>\n\n"
+                            f"````json\n{event_json}\n````\n\n</details>\n"
                         )
 
                     elif event_type == "response.tool_result":
@@ -348,11 +351,11 @@ class Pipe:
                         prefix = "❌" if is_error else "📎"
                         label = f"{prefix} Result"
                         if tool_name:
-                            label += f" ({tool_name})"
-                        event_json = json.dumps(event, indent=2, ensure_ascii=False)
+                            label += f" ({html.escape(tool_name)})"
+                        result_text = str(event.get("content", ""))[:500]
                         yield (
                             f"\n<details>\n<summary>{label}</summary>\n\n"
-                            f"```json\n{event_json}\n```\n\n</details>\n"
+                            f"````\n{result_text}\n````\n\n</details>\n"
                         )
 
                     elif event_type == "response.completed":
@@ -366,6 +369,9 @@ class Pipe:
                                 "model": self.valves.MODEL,
                             }
                             log.debug("Chain updated: chat=%s, response_id=%s", chat_id, new_id)
+                        # Flush a trailing newline so the markdown renderer
+                        # finalizes the last HTML block (e.g. </details>)
+                        yield "\n"
 
                     elif event_type in ("response.failed", "error"):
                         error = event.get("response", {}).get("error", {})

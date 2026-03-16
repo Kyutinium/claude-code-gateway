@@ -342,7 +342,8 @@ class Pipe:
                             yield f"[Tool: {name}]\n"
                         else:
                             escaped = html.escape(name)
-                            yield f'\n<details>\n<summary>Tool: {escaped}</summary>\n\n```json\n{json.dumps(event, indent=2, ensure_ascii=False)}\n```\n\n</details>\n'
+                            event_json = json.dumps(event, indent=2, ensure_ascii=False)
+                            yield f'\n<details>\n<summary>Tool: {escaped}</summary>\n\n````json\n{event_json}\n````\n\n</details>\n'
                         continue
 
                     if event_type == "response.tool_result":
@@ -362,7 +363,7 @@ class Pipe:
                             escaped = html.escape(tool_name) if tool_name else ""
                             label = f"{prefix}: {escaped}" if escaped else prefix
                             result_text = str(content)[:500]
-                            yield f'\n<details>\n<summary>{label}</summary>\n\n```\n{result_text}\n```\n\n</details>\n'
+                            yield f'\n<details>\n<summary>{label}</summary>\n\n````\n{result_text}\n````\n\n</details>\n'
                         continue
 
                     if event_type == "response.task_started":
@@ -420,6 +421,8 @@ class Pipe:
                                 "instructions_hash": instructions_hash,
                                 "model": self.valves.MODEL,
                             }
+                        # Flush so the renderer finalizes the last HTML block
+                        yield "\n"
                         continue
 
                     if event_type in ("response.failed", "error"):

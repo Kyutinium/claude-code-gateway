@@ -557,8 +557,10 @@ class Pipeline:
                                 "model": self.valves.MODEL,
                             }
                             log.debug("Chain updated: chat=%s, response_id=%s", chat_id, new_id)
-                        # Flush trailing newline to force markdown renderer to finalize last block
-                        yield "\n"
+                        # Invisible content that forces the markdown renderer
+                        # to finalize the last HTML block (e.g. </details>).
+                        # A bare "\n" is ignored; a zero-width space is real content.
+                        yield "\n\u200b"
 
                     elif event_type in ("response.failed", "error"):
                         error = event.get("response", {}).get("error", {})
