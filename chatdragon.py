@@ -547,8 +547,20 @@ class Pipeline:
                         pending = tool_pending.pop(tool_id, {})
                         name = pending.get("name", tool_names.get(tool_id, ""))
                         args = pending.get("args", "{}")
-                        result_content = str(event.get("content", ""))[:500]
                         is_error = event.get("is_error", False)
+                        # Extract text from content — may be a string, list of
+                        # content blocks, or empty/None.
+                        raw_content = event.get("content", "")
+                        if isinstance(raw_content, list):
+                            result_content = " ".join(
+                                b.get("text", "") if isinstance(b, dict) else str(b)
+                                for b in raw_content
+                            ).strip()
+                        else:
+                            result_content = str(raw_content or "").strip()
+                        if not result_content and is_error:
+                            result_content = event.get("error", "Tool execution failed")
+                        result_content = result_content[:500]
                         # Escape for HTML attributes
                         esc_name = html.escape(name)
                         esc_args = html.escape(args)
