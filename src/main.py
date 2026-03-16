@@ -34,6 +34,7 @@ from src.constants import (
     MAX_REQUEST_SIZE,
 )
 from src.mcp_config import get_mcp_servers
+from src.request_logger import request_logger, RequestLogEntry
 from src.routes.deps import truncate_image_data
 
 # Note: load_dotenv() is called in constants.py at import time
@@ -330,12 +331,72 @@ class DebugLoggingMiddleware(BaseHTTPMiddleware):
             raise
 
 
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log request metadata to the in-memory request logger for admin observability.
+
+    Excludes ``/admin/api/*`` and other non-API paths by default (configured
+    via ``request_logger.should_log``).  Latency measures handler creation
+    time only — streaming completion time is **not** included.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if not request_logger.should_log(path):
+            return await call_next(request)
+
+        start = asyncio.get_event_loop().time()
+        model: Optional[str] = None
+        session_id: Optional[str] = None
+        backend: Optional[str] = None
+
+        # Extract model/session_id from request body for /v1/ POST endpoints.
+        # Follow the same safety pattern as the existing debug middleware:
+        # small payloads only, tolerate parse failure.
+        if request.method == "POST" and path.startswith("/v1/"):
+            try:
+                content_length = request.headers.get("content-length")
+                if content_length and int(content_length) < 100_000:
+                    body = await request.body()
+                    if body:
+                        parsed = json.loads(body.decode())
+                        model = parsed.get("model")
+                        session_id = parsed.get("session_id")
+            except Exception:
+                pass
+
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        except Exception:
+            raise
+        finally:
+            elapsed_ms = (asyncio.get_event_loop().time() - start) * 1000
+            client_ip = request.client.host if request.client else "unknown"
+            entry = RequestLogEntry(
+                timestamp=__import__("time").time(),
+                method=request.method,
+                path=path,
+                status_code=status_code,
+                response_time_ms=round(elapsed_ms, 2),
+                client_ip=client_ip,
+                model=model,
+                backend=backend,
+                session_id=session_id,
+            )
+            request_logger.log(entry)
+
+
 # Add security middleware (order matters - first added = last executed)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestSizeLimitMiddleware)
 
 # Add the debug middleware
 app.add_middleware(DebugLoggingMiddleware)
+
+# Add request logging middleware (for admin observability)
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # ==================== Exception Handlers ====================

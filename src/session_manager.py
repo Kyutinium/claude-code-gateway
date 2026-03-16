@@ -226,6 +226,17 @@ class SessionManager:
                 session.touch()
             return session
 
+    def peek_session(self, session_id: str) -> Optional[Session]:
+        """Read-only session access — does **not** refresh TTL.
+
+        Used by admin endpoints that should observe sessions without
+        extending their lifetime.  Returns ``None`` when the session
+        does not exist or is expired.
+        """
+        with self.lock:
+            self._remove_if_expired(session_id)
+            return self.sessions.get(session_id)
+
     def delete_session(self, session_id: str) -> bool:
         """Delete a session.  Returns ``True`` if it was found and removed."""
         with self.lock:

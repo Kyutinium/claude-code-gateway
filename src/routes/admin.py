@@ -12,6 +12,9 @@ File read:      GET  /admin/api/files/{path:path}
 File write:     PUT  /admin/api/files/{path:path}
 Config:         GET  /admin/api/config
 Session delete: DELETE /admin/api/sessions/{session_id}
+Logs:           GET  /admin/api/logs
+Rate limits:    GET  /admin/api/rate-limits
+Session msgs:   GET  /admin/api/sessions/{session_id}/messages
 """
 
 import logging
@@ -29,6 +32,7 @@ from src.admin_auth import (
 )
 from src.admin_service import (
     get_redacted_config,
+    get_session_messages,
     list_workspace_files,
     read_file,
     write_file,
@@ -206,3 +210,76 @@ async def delete_session(session_id: str, _=Depends(require_admin)):
 async def get_config(_=Depends(require_admin)):
     """Return redacted runtime configuration."""
     return get_redacted_config()
+
+
+# ---------------------------------------------------------------------------
+# Request logs (Feature 1)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/logs")
+async def get_logs(
+    endpoint: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    _=Depends(require_admin),
+):
+    """Return paginated request logs with summary stats.
+
+    *status* accepts an exact code (``200``) or a class prefix (``4xx``, ``5xx``).
+    """
+    from src.request_logger import request_logger
+
+    return request_logger.query(
+        endpoint=endpoint,
+        status=status,
+        limit=min(limit, 200),
+        offset=max(offset, 0),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rate limit monitoring (Feature 2)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/rate-limits")
+async def get_rate_limits(_=Depends(require_admin)):
+    """Return approximate rate-limit usage derived from request logs.
+
+    This is an approximation — actual enforcement is handled by slowapi.
+    """
+    from src.request_logger import request_logger
+
+    return {
+        "snapshot": request_logger.get_rate_limit_snapshot(),
+        "_note": "Approximate monitoring based on request logs. "
+        "Actual enforcement is handled by the rate limiter (slowapi).",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Session message history (Feature 3)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/sessions/{session_id}/messages")
+async def get_session_history(
+    session_id: str,
+    truncate: int = 500,
+    _=Depends(require_admin),
+):
+    """Return message history for a session (read-only, no TTL refresh).
+
+    Content may contain sensitive user data.
+    """
+    messages = get_session_messages(session_id, truncate=max(truncate, 0))
+    if messages is None:
+        return JSONResponse(status_code=404, content={"error": "Session not found"})
+    return {
+        "session_id": session_id,
+        "messages": messages,
+        "total": len(messages),
+        "_warning": "Message content may contain sensitive user data.",
+    }

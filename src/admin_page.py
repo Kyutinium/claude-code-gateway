@@ -118,6 +118,8 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
       <!-- Tabs -->
       <nav class="tabs">
         <button :class="{ active: tab === 'dashboard' }" @click="tab='dashboard'">Dashboard</button>
+        <button :class="{ active: tab === 'logs' }" @click="tab='logs'; loadLogs()">Logs</button>
+        <button :class="{ active: tab === 'ratelimits' }" @click="tab='ratelimits'; loadRateLimits()">Rate Limits</button>
         <button :class="{ active: tab === 'files' }" @click="tab='files'; loadFiles()">Workspace</button>
         <button :class="{ active: tab === 'sessions' }" @click="tab='sessions'; loadSummary()">Sessions</button>
         <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig()">Config</button>
@@ -176,6 +178,112 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
         </div>
       </div>
 
+      <!-- Logs Tab -->
+      <div x-show="tab==='logs'">
+        <div class="grid-3" style="margin-bottom:1rem">
+          <div class="card stat">
+            <div class="value" x-text="logs.stats?.total_requests ?? '-'"></div>
+            <div class="label">Total Requests</div>
+          </div>
+          <div class="card stat">
+            <div class="value" x-text="logs.stats?.error_count ?? '-'"></div>
+            <div class="label">Errors</div>
+          </div>
+          <div class="card stat">
+            <div class="value" x-text="logs.stats?.avg_latency_ms ? (logs.stats.avg_latency_ms + 'ms') : '-'"></div>
+            <div class="label">Avg Latency</div>
+          </div>
+        </div>
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem">
+            <h3 style="margin:0">Request Log</h3>
+            <div style="display:flex; gap:0.5rem; align-items:center">
+              <input type="text" x-model="logsFilter.endpoint" placeholder="Filter endpoint..."
+                style="padding:4px 8px; font-size:0.8rem; width:160px" @input.debounce.300ms="loadLogs()">
+              <select x-model="logsFilter.status" @change="loadLogs()"
+                style="padding:4px 8px; font-size:0.8rem; width:100px">
+                <option value="">All Status</option>
+                <option value="200">200</option>
+                <option value="4xx">4xx</option>
+                <option value="5xx">5xx</option>
+              </select>
+              <label style="font-size:0.8rem; display:flex; align-items:center; gap:4px">
+                <input type="checkbox" x-model="logsAutoRefresh" @change="toggleLogsPolling()"> Auto
+              </label>
+              <button class="btn btn-sm btn-ghost" @click="loadLogs()">Refresh</button>
+            </div>
+          </div>
+          <table>
+            <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Latency</th><th>IP</th><th>Model</th></tr></thead>
+            <tbody>
+              <template x-for="e in (logs.items ?? [])" :key="e.timestamp + e.path">
+                <tr>
+                  <td style="font-size:0.75rem; white-space:nowrap" x-text="formatTime(new Date(e.timestamp * 1000).toISOString())"></td>
+                  <td><span class="badge badge-ok" x-text="e.method"></span></td>
+                  <td style="font-family:monospace; font-size:0.8rem; max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" x-text="e.path"></td>
+                  <td><span :class="e.status_code < 400 ? 'badge badge-ok' : e.status_code < 500 ? 'badge badge-warn' : 'badge badge-err'" x-text="e.status_code"></span></td>
+                  <td style="font-size:0.8rem" x-text="e.response_time_ms + 'ms'"></td>
+                  <td style="font-size:0.8rem; font-family:monospace" x-text="e.client_ip"></td>
+                  <td style="font-size:0.8rem" x-text="e.model || '-'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div x-show="(logs.items ?? []).length === 0"
+            style="color:var(--text-muted); padding:1rem; text-align:center">No logs yet</div>
+          <div x-show="logs.total > 50" style="display:flex; justify-content:center; gap:0.5rem; margin-top:0.75rem">
+            <button class="btn btn-sm btn-ghost" @click="logsPage = Math.max(0, logsPage-1); loadLogs()" :disabled="logsPage === 0">Prev</button>
+            <span style="font-size:0.8rem; padding:4px 8px; color:var(--text-muted)" x-text="'Page ' + (logsPage+1)"></span>
+            <button class="btn btn-sm btn-ghost" @click="logsPage++; loadLogs()" :disabled="(logsPage+1)*50 >= logs.total">Next</button>
+          </div>
+          <div style="font-size:0.75rem; color:var(--text-muted); margin-top:0.5rem; text-align:right"
+            x-text="'Latency = handler creation time only (streaming completion not included)'"></div>
+        </div>
+      </div>
+
+      <!-- Rate Limits Tab -->
+      <div x-show="tab==='ratelimits'">
+        <div class="card" style="margin-bottom:0.75rem">
+          <p style="font-size:0.8rem; color:var(--text-muted); margin:0">
+            Approximate monitoring based on request logs. Actual enforcement is handled by slowapi.
+          </p>
+        </div>
+        <div class="grid-2">
+          <template x-for="(data, bucket) in (rateLimits.snapshot ?? {})" :key="bucket">
+            <div class="card">
+              <h3 x-text="bucket" style="text-transform:uppercase"></h3>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem">
+                <span style="font-size:0.85rem" x-text="data.total_usage + ' / ' + data.limit + ' req/min'"></span>
+                <span :class="(data.total_usage / data.limit * 100) > 90 ? 'badge badge-err' :
+                  (data.total_usage / data.limit * 100) > 70 ? 'badge badge-warn' : 'badge badge-ok'"
+                  x-text="Math.round(data.total_usage / data.limit * 100) + '%'"></span>
+              </div>
+              <div style="background:var(--subtle-bg); border-radius:4px; height:8px; overflow:hidden; margin-bottom:0.75rem">
+                <div :style="'width:' + Math.min(100, data.total_usage / data.limit * 100) + '%; height:100%; border-radius:4px; background:' +
+                  ((data.total_usage / data.limit * 100) > 90 ? '#ef4444' : (data.total_usage / data.limit * 100) > 70 ? '#f59e0b' : '#16a34a')"></div>
+              </div>
+              <template x-if="data.clients && data.clients.length > 0">
+                <table>
+                  <thead><tr><th>IP</th><th>Count</th><th>Usage</th></tr></thead>
+                  <tbody>
+                    <template x-for="c in data.clients" :key="c.ip">
+                      <tr>
+                        <td style="font-family:monospace; font-size:0.8rem" x-text="c.ip"></td>
+                        <td x-text="c.count"></td>
+                        <td><span :class="c.pct_used > 90 ? 'badge badge-err' : c.pct_used > 70 ? 'badge badge-warn' : 'badge badge-ok'"
+                          x-text="c.pct_used + '%'"></span></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </template>
+              <div x-show="!data.clients || data.clients.length === 0"
+                style="font-size:0.8rem; color:var(--text-muted)">No traffic</div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <!-- Workspace Tab -->
       <div x-show="tab==='files'">
         <div class="sidebar">
@@ -221,13 +329,49 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
             <thead><tr><th>Session ID</th><th>Messages</th><th>Last Active</th><th>Expires</th><th></th></tr></thead>
             <tbody>
               <template x-for="s in (summary.sessions?.sessions ?? [])" :key="s.session_id">
-                <tr>
-                  <td style="font-family:monospace; font-size:0.8rem" x-text="s.session_id?.substring(0,16) + '...'"></td>
+                <tr @click="toggleSessionHistory(s.session_id)" style="cursor:pointer">
+                  <td style="font-family:monospace; font-size:0.8rem">
+                    <span x-text="expandedSession === s.session_id ? '▼ ' : '▶ '"></span>
+                    <span x-text="s.session_id?.substring(0,16) + '...'"></span>
+                  </td>
                   <td x-text="s.message_count ?? '-'"></td>
                   <td x-text="formatTime(s.last_accessed)"></td>
                   <td x-text="formatTime(s.expires_at)"></td>
-                  <td><button class="btn btn-sm btn-ghost" @click="deleteSession(s.session_id)">Delete</button></td>
+                  <td>
+                    <button class="btn btn-sm btn-ghost" @click.stop="deleteSession(s.session_id)">Delete</button>
+                  </td>
                 </tr>
+                <!-- Expanded message history -->
+                <template x-if="expandedSession === s.session_id && sessionMessages">
+                  <tr>
+                    <td colspan="5" style="padding:0">
+                      <div style="background:var(--subtle-bg); padding:1rem; border-radius:0 0 4px 4px">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem">
+                          <span style="font-size:0.8rem; color:var(--text-muted)">
+                            Message History (<span x-text="sessionMessages.total"></span> messages)
+                          </span>
+                          <span class="badge badge-warn" style="font-size:0.7rem">Content may contain sensitive data</span>
+                        </div>
+                        <template x-for="m in (sessionMessages.messages ?? [])" :key="m.index">
+                          <div :style="'margin-bottom:0.5rem; padding:8px 12px; border-radius:6px; max-width:85%;' +
+                            (m.role === 'user' ? 'background:var(--card-bg); margin-right:auto;' :
+                             m.role === 'assistant' ? 'background:#16a34a22; margin-left:auto;' :
+                             'background:#f59e0b22; margin-right:auto;')">
+                            <div style="font-size:0.7rem; font-weight:600; margin-bottom:4px"
+                              :style="m.role === 'user' ? 'color:var(--accent)' : m.role === 'assistant' ? 'color:#16a34a' : 'color:#f59e0b'"
+                              x-text="m.role.toUpperCase() + (m.name ? ' (' + m.name + ')' : '')"></div>
+                            <div style="font-size:0.8rem; white-space:pre-wrap; word-break:break-word"
+                              x-text="m.content || '(empty)'"></div>
+                            <span x-show="m.truncated" style="font-size:0.7rem; color:var(--text-muted); cursor:pointer"
+                              @click.stop="loadFullMessage(s.session_id, m.index)">[...truncated - click to expand]</span>
+                          </div>
+                        </template>
+                        <div x-show="!sessionMessages.messages || sessionMessages.messages.length === 0"
+                          style="color:var(--text-muted); font-size:0.8rem; text-align:center">No messages</div>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
               </template>
             </tbody>
           </table>
@@ -303,6 +447,14 @@ function adminApp() {
     cm: null,
     toast: { show: false, msg: '', type: 'ok' },
     pollTimer: null,
+    logs: {},
+    logsFilter: { endpoint: '', status: '' },
+    logsPage: 0,
+    logsAutoRefresh: false,
+    logsPollTimer: null,
+    rateLimits: {},
+    expandedSession: null,
+    sessionMessages: null,
 
     async init() {
       // Check if already authenticated (cookie-based)
@@ -430,8 +582,69 @@ function adminApp() {
       this.showToast('Refreshed', 'ok');
     },
 
+    // --- Logs ---
+    async loadLogs() {
+      try {
+        let url = '/admin/api/logs?limit=50&offset=' + (this.logsPage * 50);
+        if (this.logsFilter.endpoint) url += '&endpoint=' + encodeURIComponent(this.logsFilter.endpoint);
+        if (this.logsFilter.status) url += '&status=' + this.logsFilter.status;
+        const r = await this.api(url);
+        if (r.ok) this.logs = await r.json();
+      } catch(e) {}
+    },
+    toggleLogsPolling() {
+      if (this.logsPollTimer) { clearInterval(this.logsPollTimer); this.logsPollTimer = null; }
+      if (this.logsAutoRefresh) { this.logsPollTimer = setInterval(() => this.loadLogs(), 5000); }
+    },
+
+    // --- Rate Limits ---
+    async loadRateLimits() {
+      try {
+        const r = await this.api('/admin/api/rate-limits');
+        if (r.ok) this.rateLimits = await r.json();
+      } catch(e) {}
+    },
+
+    // --- Session Messages ---
+    async toggleSessionHistory(sessionId) {
+      if (this.expandedSession === sessionId) {
+        this.expandedSession = null;
+        this.sessionMessages = null;
+        return;
+      }
+      this.expandedSession = sessionId;
+      this.sessionMessages = null;
+      try {
+        const r = await this.api('/admin/api/sessions/' + encodeURIComponent(sessionId) + '/messages?truncate=500');
+        if (!r.ok) { if (this.expandedSession === sessionId) { this.showToast('Failed to load messages', 'err'); this.expandedSession = null; } return; }
+        const data = await r.json();
+        // Guard after all async work: only mutate state if still viewing the same session
+        if (this.expandedSession !== sessionId) return;
+        this.sessionMessages = data;
+      } catch(e) { if (this.expandedSession === sessionId) { this.showToast('Connection error', 'err'); this.expandedSession = null; } }
+    },
+    async loadFullMessage(sessionId, msgIndex) {
+      try {
+        const r = await this.api('/admin/api/sessions/' + encodeURIComponent(sessionId) + '/messages?truncate=0');
+        if (!r.ok) return;
+        const data = await r.json();
+        // Guard after all async work: only mutate state if still viewing the same session
+        if (this.expandedSession !== sessionId) return;
+        if (this.sessionMessages && this.sessionMessages.messages) {
+          const full = data.messages.find(m => m.index === msgIndex);
+          if (full) {
+            const idx = this.sessionMessages.messages.findIndex(m => m.index === msgIndex);
+            if (idx >= 0) { this.sessionMessages.messages[idx] = full; }
+          }
+        }
+      } catch(e) {}
+    },
+
     startPolling() { this.pollTimer = setInterval(() => this.loadSummary(), 15000); },
-    stopPolling() { if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; } },
+    stopPolling() {
+      if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
+      if (this.logsPollTimer) { clearInterval(this.logsPollTimer); this.logsPollTimer = null; }
+    },
 
     showToast(msg, type) {
       this.toast = { show: true, msg, type };

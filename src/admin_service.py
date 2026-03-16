@@ -331,6 +331,70 @@ def write_file(relative_path: str, content: str, expected_etag: Optional[str] = 
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Session message history (read-only, no TTL refresh)
+# ---------------------------------------------------------------------------
+
+
+def get_session_messages(
+    session_id: str,
+    truncate: int = 500,
+) -> Optional[List[Dict[str, Any]]]:
+    """Return message history for a session without refreshing TTL.
+
+    Returns ``None`` when the session does not exist.  Content is truncated
+    to *truncate* characters in the response; set to ``0`` for full content.
+
+    Multimodal content (``image_url`` parts) is represented as ``[Image]``
+    placeholder text.
+    """
+    from src.session_manager import session_manager
+
+    session = session_manager.peek_session(session_id)
+    if session is None:
+        return None
+
+    messages = session.get_all_messages()  # returns a shallow copy
+    result: List[Dict[str, Any]] = []
+
+    for idx, msg in enumerate(messages):
+        content = msg.content
+        # Handle multimodal content (list of ContentPart)
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if hasattr(part, "type"):
+                    if part.type == "image_url":
+                        parts.append("[Image]")
+                    elif part.type == "text" and part.text:
+                        parts.append(part.text)
+                elif isinstance(part, dict):
+                    if part.get("type") == "image_url":
+                        parts.append("[Image]")
+                    elif part.get("type") == "text":
+                        parts.append(part.get("text", ""))
+            display = "\n".join(parts)
+        else:
+            display = str(content) if content else ""
+
+        truncated = False
+        if truncate > 0 and len(display) > truncate:
+            display = display[:truncate]
+            truncated = True
+
+        result.append(
+            {
+                "index": idx,
+                "role": msg.role,
+                "content": display,
+                "truncated": truncated,
+                "name": msg.name,
+            }
+        )
+
+    return result
+
+
 def get_redacted_config() -> Dict[str, Any]:
     """Return runtime configuration with secrets masked."""
     from src.constants import (
