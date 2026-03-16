@@ -63,6 +63,7 @@ from src.rate_limiter import (
     rate_limit_endpoint,
 )
 from src.constants import (
+    CD_OPENWEBUI,
     DEFAULT_TIMEOUT_MS,
     DEFAULT_PORT,
     DEFAULT_HOST,
@@ -952,6 +953,14 @@ async def chat_completions(
 ):
     """OpenAI-compatible chat completions endpoint with backend dispatch."""
     await verify_api_key(request, credentials)
+
+    # When CD_OPENWEBUI is enabled, map the Open WebUI chat ID to session_id
+    # so conversation history is preserved across turns automatically.
+    if CD_OPENWEBUI and not request_body.session_id:
+        owui_chat_id = request.headers.get("x-openwebui-chat-id")
+        if owui_chat_id:
+            request_body.session_id = owui_chat_id
+            logger.debug("Open WebUI chat_id mapped to session_id: %s", owui_chat_id)
 
     try:
         # Resolve model → backend and validate auth
