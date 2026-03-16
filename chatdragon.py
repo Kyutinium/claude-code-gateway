@@ -567,8 +567,6 @@ class Pipeline:
                             chars = m.group(1) if m else "large"
                             result_content = f"Result truncated ({chars} chars)"
                         result_content = result_content[:500]
-                        # Always render as a <details> block — errors show
-                        # with status="error" so the UI can style them.
                         esc_name = html.escape(name)
                         esc_args = html.escape(args)
                         esc_result = html.escape(result_content)
@@ -579,7 +577,8 @@ class Pipeline:
                             f' result="{esc_result}"'
                             f' status="{status}"'
                             f' done="true">\n'
-                            f"<summary>View Result from {esc_name}</summary>\n"
+                            f"<summary>Tool: {esc_name}</summary>\n"
+                            f"<pre>{esc_result}</pre>\n"
                             f"</details>\n\n"
                         )
 
