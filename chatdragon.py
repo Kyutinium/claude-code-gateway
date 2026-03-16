@@ -562,7 +562,11 @@ class Pipeline:
                                 "model": self.valves.MODEL,
                             }
                             log.debug("Chain updated: chat=%s, response_id=%s", chat_id, new_id)
-                        yield "\n"
+                        # Yield trailing content to force Open WebUI's streaming
+                        # markdown renderer to do a final re-parse. Without this,
+                        # the last <details> block may not render because the
+                        # marked tokenizer's debounced update never fires.
+                        yield "\n\n\u200b"
 
                     elif event_type in ("response.failed", "error"):
                         error = event.get("response", {}).get("error", {})
