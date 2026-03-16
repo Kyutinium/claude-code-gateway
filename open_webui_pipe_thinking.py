@@ -21,12 +21,6 @@ from pydantic import BaseModel, Field
 log = logging.getLogger(__name__)
 
 RESPONSE_SENTINEL = "<response>"
-RESPONSE_SENTINEL_INSTRUCTION = (
-    "\n\n## Response Format\n"
-    "When you have finished all tool calls and are ready to write your final answer, "
-    "you MUST output the exact token `<response>` on its own line before your answer. "
-    "Do not include any other text on that line. Begin your answer immediately after."
-)
 
 
 class SentinelFilter:
@@ -112,6 +106,19 @@ class Pipe:
                 "Open WebUI collapses these so only the final answer is visible."
             ),
         )
+        RESPONSE_SENTINEL_INSTRUCTION: str = Field(
+            default=(
+                "\n\n## Response Format\n"
+                "When you have finished all tool calls and are ready to write your final answer, "
+                "you MUST output the exact token `<response>` on its own line before your answer. "
+                "Do not include any other text on that line. Begin your answer immediately after."
+            ),
+            description=(
+                "Instruction appended to the system prompt telling the model to emit "
+                "<response> before its final answer. Set to empty to disable sentinel "
+                "detection (all text will stay inside the <think> block)."
+            ),
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -189,15 +196,20 @@ class Pipe:
                 "input": current_input,
                 "stream": use_stream,
             }
+            sentinel_instruction = (
+                self.valves.RESPONSE_SENTINEL_INSTRUCTION.strip()
+                if self.valves.WRAP_THINKING
+                else ""
+            )
             if prev_response_id:
                 payload["previous_response_id"] = prev_response_id
             elif instructions:
-                if self.valves.WRAP_THINKING:
-                    payload["instructions"] = instructions + RESPONSE_SENTINEL_INSTRUCTION
+                if sentinel_instruction:
+                    payload["instructions"] = instructions + "\n\n" + sentinel_instruction
                 else:
                     payload["instructions"] = instructions
-            elif self.valves.WRAP_THINKING:
-                payload["instructions"] = RESPONSE_SENTINEL_INSTRUCTION.strip()
+            elif sentinel_instruction:
+                payload["instructions"] = sentinel_instruction
 
             if use_stream:
                 async for chunk in self._pipe_stream(
