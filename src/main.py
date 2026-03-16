@@ -616,11 +616,12 @@ async def _stream_chunks(
 
 
 def _mcp_allowed_tools() -> Optional[List[str]]:
-    """Return symbolic MCP tool patterns if MCP servers are configured, else None."""
+    """Return DEFAULT_ALLOWED_TOOLS plus symbolic MCP tool patterns."""
+    tools = list(DEFAULT_ALLOWED_TOOLS)
     servers = get_mcp_servers()
-    if not servers:
-        return None
-    return get_mcp_tool_patterns(servers)
+    if servers:
+        tools.extend(get_mcp_tool_patterns(servers))
+    return tools
 
 
 def _prepare_stateless_completion(messages: list, claude_options: Dict[str, Any]) -> tuple:
@@ -999,9 +1000,7 @@ async def chat_completions(
 
             session = None
             if request_body.session_id:
-                prompt, sys_prompt, session = _prepare_session_prompt(
-                    request_body, backend=backend
-                )
+                prompt, sys_prompt, session = _prepare_session_prompt(request_body, backend=backend)
 
                 # Acquire lock BEFORE is_new check to prevent concurrent first-turn race
                 async with session.lock:
