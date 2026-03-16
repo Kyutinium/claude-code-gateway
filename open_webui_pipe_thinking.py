@@ -126,6 +126,7 @@ class Pipe:
         self.chat_state: dict[str, dict] = {}
         # Per-chat locks for concurrency safety
         self._locks: dict[str, asyncio.Lock] = {}
+        self._extra_headers: dict[str, str] = {}
 
     def pipes(self) -> list[dict]:
         return [
@@ -160,6 +161,20 @@ class Pipe:
         __metadata__ = __metadata__ or {}
         chat_id = __metadata__.get("chat_id", "")
 
+        # Forward cookies and user info as headers to the gateway
+        self._extra_headers = {}
+        meta_headers = __metadata__.get("headers", {})
+        # Forward dscrowd.token_key cookie for MCP Confluence auth
+        dscrowd_token = meta_headers.get("x-cookie-dscrowd.token_key", "")
+        if dscrowd_token:
+            self._extra_headers["X-Cookie-dscrowd.token_key"] = dscrowd_token
+        # Forward username from ENABLE_FORWARD_USER_INFO_HEADERS (lowercased in metadata)
+        owui_username = meta_headers.get("x-openwebui-user-name", "")
+        if not owui_username and __user__ and isinstance(__user__, dict):
+            owui_username = __user__.get("name", "") or __user__.get("email", "")
+        if owui_username:
+            self._extra_headers["X-MLM-Username"] = owui_username
+
         if not chat_id:
             log.warning("[THINK-PIPE] No chat_id in metadata, multi-turn chaining disabled")
 
@@ -169,6 +184,15 @@ class Pipe:
             return
 
         instructions = self._extract_instructions(messages)
+        # Prepend user context to instructions
+        context_parts = []
+        if dscrowd_token:
+            context_parts.append(f"dscrowd.token_key: {dscrowd_token}")
+        if owui_username:
+            context_parts.append(f"mlm_username: {owui_username}")
+        if context_parts:
+            context = "\n\n".join(context_parts)
+            instructions = f"{context}\n\n{instructions}" if instructions else context
         current_input = self._extract_current_input(messages)
         if not current_input:
             yield "Error: No user message found."
@@ -256,8 +280,7 @@ class Pipe:
                 yield f"Error: {e}"
 
     async def _stream_responses(
-        self, chat_id: str, payload: dict, instructions_hash: str
-    ) -> AsyncGenerator[str, None]:
+        self, chat_id: str, payload: dict, instructions_hash: str    ) -> AsyncGenerator[str, None]:
         """Streaming /v1/responses call with <think> wrapping."""
         wrap = self.valves.WRAP_THINKING
         think_open = False
@@ -442,8 +465,7 @@ class Pipe:
     # ------------------------------------------------------------------
 
     async def _pipe_non_stream(
-        self, chat_id: str, payload: dict, instructions: str, instructions_hash: str, body: dict
-    ) -> str:
+        self, chat_id: str, payload: dict, instructions: str, instructions_hash: str, body: dict    ) -> str:
         try:
             return await self._call_responses(chat_id, payload, instructions_hash)
         except ChainResetError as e:
@@ -503,6 +525,7 @@ class Pipe:
         headers = {"Content-Type": "application/json"}
         if self.valves.API_KEY:
             headers["Authorization"] = f"Bearer {self.valves.API_KEY}"
+        headers.update(self._extra_headers)
         return headers
 
     def _responses_url(self) -> str:
