@@ -17,7 +17,8 @@ from src.auth import verify_api_key, security
 from src.backends import BackendRegistry, resolve_model
 from src.backends.claude.constants import DEFAULT_ALLOWED_TOOLS
 from src.rate_limiter import rate_limit_endpoint
-from src.constants import DEFAULT_MAX_TURNS, PERMISSION_MODE_BYPASS
+from src.constants import PERMISSION_MODE_BYPASS
+from src.runtime_config import get_default_max_turns
 from src.mcp_config import get_mcp_servers
 from src import streaming_utils
 from src.routes.deps import (
@@ -99,7 +100,7 @@ async def anthropic_messages(
             prompt=prompt,
             system_prompt=system_prompt,
             model=request_body.model,
-            max_turns=DEFAULT_MAX_TURNS,
+            max_turns=get_default_max_turns(),
             allowed_tools=DEFAULT_ALLOWED_TOOLS,
             permission_mode=PERMISSION_MODE_BYPASS,
             stream=False,

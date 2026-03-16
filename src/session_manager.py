@@ -209,7 +209,16 @@ class SessionManager:
                     self.sessions[session_id].touch()
                     return self.sessions[session_id]
 
-            session = Session(session_id=session_id, ttl_minutes=self.default_ttl_minutes)
+            # Use runtime override if admin changed it, otherwise honor
+            # the constructor-provided default_ttl_minutes so non-global
+            # SessionManager instances still work correctly.
+            from src.runtime_config import runtime_config
+
+            if runtime_config.is_overridden("session_max_age_minutes"):
+                ttl = runtime_config.get("session_max_age_minutes")
+            else:
+                ttl = self.default_ttl_minutes
+            session = Session(session_id=session_id, ttl_minutes=ttl)
             self.sessions[session_id] = session
             logger.info(f"Created new session: {session_id}")
             return session

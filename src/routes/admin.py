@@ -18,7 +18,7 @@ Session msgs:   GET  /admin/api/sessions/{session_id}/messages
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, Response
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -55,6 +55,11 @@ class LoginRequest(BaseModel):
 class FileWriteRequest(BaseModel):
     content: str
     etag: Optional[str] = None
+
+
+class RuntimeConfigUpdate(BaseModel):
+    key: str
+    value: Any
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +288,52 @@ async def get_session_history(
         "total": len(messages),
         "_warning": "Message content may contain sensitive user data.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Runtime configuration (hot-reload)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/runtime-config")
+async def get_runtime_config(_=Depends(require_admin)):
+    """Return all editable runtime settings with current values."""
+    from src.runtime_config import runtime_config
+
+    return {"settings": runtime_config.get_all()}
+
+
+@router.patch("/api/runtime-config")
+async def update_runtime_config(body: RuntimeConfigUpdate, _=Depends(require_admin)):
+    """Update a single runtime setting. Takes effect on next request."""
+    from src.runtime_config import runtime_config
+
+    try:
+        runtime_config.set(body.key, body.value)
+        return {
+            "status": "updated",
+            "key": body.key,
+            "value": runtime_config.get(body.key),
+        }
+    except KeyError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except (ValueError, TypeError) as e:
+        return JSONResponse(status_code=422, content={"error": f"Invalid value: {e}"})
+
+
+@router.post("/api/runtime-config/reset")
+async def reset_runtime_config(
+    key: Optional[str] = None,
+    _=Depends(require_admin),
+):
+    """Reset runtime overrides. If *key* is given, reset that key only."""
+    from src.runtime_config import runtime_config
+
+    if key:
+        try:
+            runtime_config.reset(key)
+        except KeyError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+        return {"status": "reset", "key": key, "value": runtime_config.get(key)}
+    runtime_config.reset_all()
+    return {"status": "all_reset"}

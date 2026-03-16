@@ -122,7 +122,7 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
         <button :class="{ active: tab === 'ratelimits' }" @click="tab='ratelimits'; loadRateLimits()">Rate Limits</button>
         <button :class="{ active: tab === 'files' }" @click="tab='files'; loadFiles()">Workspace</button>
         <button :class="{ active: tab === 'sessions' }" @click="tab='sessions'; loadSummary()">Sessions</button>
-        <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig()">Config</button>
+        <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig(); loadRuntimeConfig()">Config</button>
       </nav>
 
       <!-- Dashboard Tab -->
@@ -382,6 +382,57 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
 
       <!-- Config Tab -->
       <div x-show="tab==='config'">
+        <!-- Runtime Config Editor (hot-reload) -->
+        <div class="card" style="margin-bottom:1rem">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem">
+            <h3 style="margin:0">Runtime Settings <span style="font-size:0.7rem; color:var(--accent)">(hot-reload)</span></h3>
+            <div style="display:flex; gap:0.5rem">
+              <button class="btn btn-sm btn-ghost" @click="resetAllRuntimeConfig()">Reset All</button>
+              <button class="btn btn-sm btn-ghost" @click="loadRuntimeConfig()">Refresh</button>
+            </div>
+          </div>
+          <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem">
+            Changes take effect on the next request. No server restart needed.
+          </p>
+          <table>
+            <thead><tr><th>Setting</th><th>Value</th><th>Original</th><th></th></tr></thead>
+            <tbody>
+              <template x-for="(meta, key) in (runtimeConfig ?? {})" :key="key">
+                <tr>
+                  <td>
+                    <div class="config-key" x-text="meta.label"></div>
+                    <div style="font-size:0.7rem; color:var(--text-muted)" x-text="meta.description"></div>
+                  </td>
+                  <td style="min-width:160px">
+                    <template x-if="meta.type === 'bool'">
+                      <select :value="meta.value ? 'true' : 'false'" @change="updateRuntimeConfig(key, $event.target.value === 'true')"
+                        style="padding:4px 8px; font-size:0.8rem">
+                        <option value="true">true</option>
+                        <option value="false">false</option>
+                      </select>
+                    </template>
+                    <template x-if="meta.type === 'int'">
+                      <input type="number" :value="meta.value" min="1"
+                        @change="updateRuntimeConfig(key, parseInt($event.target.value))"
+                        style="padding:4px 8px; font-size:0.8rem; width:100px">
+                    </template>
+                    <template x-if="meta.type === 'string'">
+                      <input type="text" :value="meta.value"
+                        @change="updateRuntimeConfig(key, $event.target.value)"
+                        style="padding:4px 8px; font-size:0.8rem; width:160px">
+                    </template>
+                  </td>
+                  <td style="font-size:0.8rem; color:var(--text-muted)" x-text="meta.original"></td>
+                  <td>
+                    <span x-show="meta.overridden" class="badge badge-warn" style="cursor:pointer; font-size:0.7rem"
+                      @click="resetRuntimeConfig(key)">reset</span>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+
         <div class="grid-2">
           <div class="card">
             <h3>Runtime</h3>
@@ -455,6 +506,7 @@ function adminApp() {
     rateLimits: {},
     expandedSession: null,
     sessionMessages: null,
+    runtimeConfig: {},
 
     async init() {
       // Check if already authenticated (cookie-based)
@@ -602,6 +654,37 @@ function adminApp() {
       try {
         const r = await this.api('/admin/api/rate-limits');
         if (r.ok) this.rateLimits = await r.json();
+      } catch(e) {}
+    },
+
+    // --- Runtime Config ---
+    async loadRuntimeConfig() {
+      try {
+        const r = await this.api('/admin/api/runtime-config');
+        if (r.ok) { const d = await r.json(); this.runtimeConfig = d.settings || {}; }
+      } catch(e) {}
+    },
+    async updateRuntimeConfig(key, value) {
+      try {
+        const r = await this.api('/admin/api/runtime-config', {
+          method: 'PATCH', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ key, value })
+        });
+        if (r.ok) { this.showToast('Updated: ' + key, 'ok'); await this.loadRuntimeConfig(); }
+        else { const d = await r.json(); this.showToast(d.error || 'Update failed', 'err'); }
+      } catch(e) { this.showToast('Connection error', 'err'); }
+    },
+    async resetRuntimeConfig(key) {
+      try {
+        const r = await this.api('/admin/api/runtime-config/reset?key=' + encodeURIComponent(key), { method: 'POST' });
+        if (r.ok) { this.showToast('Reset: ' + key, 'ok'); await this.loadRuntimeConfig(); }
+      } catch(e) {}
+    },
+    async resetAllRuntimeConfig() {
+      if (!confirm('Reset all runtime settings to startup defaults?')) return;
+      try {
+        const r = await this.api('/admin/api/runtime-config/reset', { method: 'POST' });
+        if (r.ok) { this.showToast('All settings reset', 'ok'); await this.loadRuntimeConfig(); }
       } catch(e) {}
     },
 

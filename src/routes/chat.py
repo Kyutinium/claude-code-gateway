@@ -22,7 +22,7 @@ from src.parameter_validator import ParameterValidator, CompatibilityReporter
 from src.session_manager import session_manager
 from src.backends import BackendConfigError, BackendRegistry, ResolvedModel
 from src.rate_limiter import rate_limit_endpoint
-from src.constants import DEFAULT_MAX_TURNS
+from src.runtime_config import get_default_max_turns
 from src import streaming_utils
 from src.routes.deps import (
     resolve_and_get_backend as _resolve_and_get_backend,
@@ -68,7 +68,7 @@ def _prepare_stateless_completion(messages: list, claude_options: Dict[str, Any]
         prompt=prompt,
         system_prompt=system_prompt,
         model=claude_options.get("model"),
-        max_turns=claude_options.get("max_turns", DEFAULT_MAX_TURNS),
+        max_turns=claude_options.get("max_turns", get_default_max_turns()),
         allowed_tools=claude_options.get("allowed_tools"),
         disallowed_tools=claude_options.get("disallowed_tools"),
         permission_mode=claude_options.get("permission_mode"),
@@ -201,7 +201,7 @@ async def _streaming_session_preflight(
             allowed_tools=options.get("allowed_tools"),
             disallowed_tools=options.get("disallowed_tools"),
             output_format=options.get("output_format"),
-            max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+            max_turns=options.get("max_turns", get_default_max_turns()),
             session_id=request.session_id if is_new else None,
             resume=resume_id,
             stream=True,
@@ -283,7 +283,7 @@ async def generate_streaming_response(
                 allowed_tools=options.get("allowed_tools"),
                 disallowed_tools=options.get("disallowed_tools"),
                 output_format=options.get("output_format"),
-                max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+                max_turns=options.get("max_turns", get_default_max_turns()),
                 session_id=request.session_id if is_new else None,
                 resume=resume_id,
                 stream=True,
@@ -472,7 +472,7 @@ async def chat_completions(
                         allowed_tools=options.get("allowed_tools"),
                         disallowed_tools=options.get("disallowed_tools"),
                         output_format=options.get("output_format"),
-                        max_turns=options.get("max_turns", DEFAULT_MAX_TURNS),
+                        max_turns=options.get("max_turns", get_default_max_turns()),
                         session_id=request_body.session_id if is_new else None,
                         resume=resume_id,
                         stream=False,

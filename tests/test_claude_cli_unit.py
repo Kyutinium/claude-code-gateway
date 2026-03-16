@@ -661,26 +661,26 @@ class TestBuildSdkOptions:
 
     def test_thinking_mode_adaptive(self, cli_instance):
         """Adaptive thinking mode sets type=adaptive."""
-        with patch("src.backends.claude.client.THINKING_MODE", "adaptive"):
+        with patch("src.runtime_config.runtime_config.get", return_value="adaptive"):
             opts = cli_instance._build_sdk_options()
             assert opts.thinking == {"type": "adaptive"}
 
     def test_thinking_mode_enabled(self, cli_instance):
         """Enabled thinking mode sets type=enabled with budget."""
-        with patch("src.backends.claude.client.THINKING_MODE", "enabled"):
+        with patch("src.runtime_config.runtime_config.get", return_value="enabled"):
             with patch("src.backends.claude.client.THINKING_BUDGET_TOKENS", 5000):
                 opts = cli_instance._build_sdk_options()
                 assert opts.thinking == {"type": "enabled", "budget_tokens": 5000}
 
     def test_thinking_mode_disabled(self, cli_instance):
         """Disabled thinking mode does not set thinking attr."""
-        with patch("src.backends.claude.client.THINKING_MODE", "disabled"):
+        with patch("src.runtime_config.runtime_config.get", return_value="disabled"):
             opts = cli_instance._build_sdk_options()
             assert not hasattr(opts, "thinking") or opts.thinking is None
 
     def test_thinking_mode_unrecognized_logs_warning(self, cli_instance):
         """Unrecognized thinking mode logs warning and does not set thinking."""
-        with patch("src.backends.claude.client.THINKING_MODE", "bogus"):
+        with patch("src.runtime_config.runtime_config.get", return_value="bogus"):
             with patch("src.backends.claude.client.logger") as mock_logger:
                 opts = cli_instance._build_sdk_options()
                 mock_logger.warning.assert_called_once()
@@ -689,13 +689,13 @@ class TestBuildSdkOptions:
 
     def test_include_partial_messages_when_token_streaming(self, cli_instance):
         """TOKEN_STREAMING=True sets include_partial_messages."""
-        with patch("src.backends.claude.client.TOKEN_STREAMING", True):
+        with patch("src.runtime_config.runtime_config.get", return_value=True):
             opts = cli_instance._build_sdk_options()
             assert opts.include_partial_messages is True
 
     def test_no_partial_messages_when_token_streaming_off(self, cli_instance):
         """TOKEN_STREAMING=False does not set include_partial_messages."""
-        with patch("src.backends.claude.client.TOKEN_STREAMING", False):
+        with patch("src.runtime_config.runtime_config.get", return_value=False):
             opts = cli_instance._build_sdk_options()
             assert not getattr(opts, "include_partial_messages", False)
 
@@ -928,7 +928,7 @@ class TestConfigureHelpers:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.THINKING_MODE", "adaptive"):
+        with patch("src.runtime_config.runtime_config.get", return_value="adaptive"):
             cli_instance._configure_thinking(opts)
         assert opts.thinking == {"type": "adaptive"}
 
@@ -937,7 +937,7 @@ class TestConfigureHelpers:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.THINKING_MODE", "enabled"):
+        with patch("src.runtime_config.runtime_config.get", return_value="enabled"):
             with patch("src.backends.claude.client.THINKING_BUDGET_TOKENS", 8000):
                 cli_instance._configure_thinking(opts)
         assert opts.thinking == {"type": "enabled", "budget_tokens": 8000}
@@ -947,7 +947,7 @@ class TestConfigureHelpers:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.THINKING_MODE", "disabled"):
+        with patch("src.runtime_config.runtime_config.get", return_value="disabled"):
             cli_instance._configure_thinking(opts)
         assert not hasattr(opts, "thinking") or opts.thinking is None
 

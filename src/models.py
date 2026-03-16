@@ -6,10 +6,10 @@ import uuid
 
 # Import DEFAULT_MODEL to avoid circular imports
 def get_default_model():
-    """Get default model from constants to avoid circular imports."""
-    from src.constants import DEFAULT_MODEL
+    """Get default model — checks runtime overrides first, then startup constant."""
+    from src.runtime_config import get_default_model as _get
 
-    return DEFAULT_MODEL
+    return _get()
 
 
 class ContentPart(BaseModel):

@@ -29,9 +29,7 @@ from src.backends.claude.constants import (
     CLAUDE_MODELS,
     CLAUDE_TOOLS,
     DEFAULT_ALLOWED_TOOLS,
-    THINKING_MODE,
     THINKING_BUDGET_TOKENS,
-    TOKEN_STREAMING,
     DISALLOWED_SUBAGENT_TYPES,
     CLAUDE_SANDBOX_ENABLED,
     CLAUDE_SANDBOX_AUTO_ALLOW_BASH,
@@ -200,12 +198,15 @@ class ClaudeCodeCLI:
 
     def _configure_thinking(self, options: ClaudeAgentOptions) -> None:
         """Apply thinking-mode configuration to *options*."""
-        if THINKING_MODE == "adaptive":
+        from src.runtime_config import get_thinking_mode
+
+        mode = get_thinking_mode()
+        if mode == "adaptive":
             options.thinking = {"type": "adaptive"}
-        elif THINKING_MODE == "enabled":
+        elif mode == "enabled":
             options.thinking = {"type": "enabled", "budget_tokens": THINKING_BUDGET_TOKENS}
-        elif THINKING_MODE != "disabled":
-            logger.warning(f"Unrecognized THINKING_MODE={THINKING_MODE!r}, thinking not configured")
+        elif mode != "disabled":
+            logger.warning(f"Unrecognized THINKING_MODE={mode!r}, thinking not configured")
 
     def _configure_tools(
         self,
@@ -302,7 +303,9 @@ class ClaudeCodeCLI:
             options.output_format = output_format
         if mcp_servers:
             options.mcp_servers = mcp_servers
-        if TOKEN_STREAMING:
+        from src.runtime_config import get_token_streaming
+
+        if get_token_streaming():
             options.include_partial_messages = True
 
         self._configure_session(options, session_id, resume)
