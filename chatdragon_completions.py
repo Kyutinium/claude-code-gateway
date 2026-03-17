@@ -439,11 +439,18 @@ class Pipeline:
                 ensure_ascii=False,
             )
             tool_pending[tool_id] = {"name": name, "args": tool_args}
+            # Only show MCP tools to the user; skip built-in SDK tools
+            # (Read, Bash, Grep, etc.) whose file paths leak implementation details.
+            if "mcp" not in name.lower():
+                return None
 
         elif event_type == "tool_result":
             tool_id = event.get("tool_use_id", "")
             pending = tool_pending.pop(tool_id, {})
             name = pending.get("name", tool_names.get(tool_id, ""))
+            # Only show MCP tool results; hide built-in SDK tool results.
+            if "mcp" not in name.lower():
+                return None
             args = pending.get("args", "{}")
             is_error = event.get("is_error", False)
             raw_content = event.get("content", "") or event.get("output", "") or event.get("result", "")
