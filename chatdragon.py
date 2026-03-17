@@ -490,6 +490,7 @@ class Pipeline:
                 line_count = 0
                 tool_names: dict = {}
                 tool_pending: dict = {}
+                active_tools: set = set()
                 for line in resp.iter_lines():
                     line_count += 1
                     if line_count <= 5 or (line.startswith("data: ") and "completed" in line):
@@ -508,9 +509,10 @@ class Pipeline:
                     if event_type == "response.output_text.delta":
                         delta = event.get("delta", "")
                         if delta:
-                            # Filter out SDK "Executing tool..." status lines
-                            stripped = delta.strip()
-                            if stripped.startswith("Executing ") and stripped.endswith("..."):
+                            # Suppress text while tools are executing —
+                            # the SDK emits bare tool names and
+                            # "Executing tool_name..." as text deltas.
+                            if active_tools:
                                 continue
                             yield delta
 
@@ -540,7 +542,7 @@ class Pipeline:
                         name = event.get("name", "")
                         if tool_id:
                             tool_names[tool_id] = name
-                        # Store tool_use args for pairing with result later
+                            active_tools.add(tool_id)
                         tool_args = json.dumps(
                             event.get("input", event.get("arguments", {})),
                             ensure_ascii=False,
@@ -549,13 +551,19 @@ class Pipeline:
 
                     elif event_type == "response.tool_result":
                         tool_id = event.get("tool_use_id", "")
+                        active_tools.discard(tool_id)
                         pending = tool_pending.pop(tool_id, {})
                         name = pending.get("name", tool_names.get(tool_id, ""))
                         args = pending.get("args", "{}")
                         is_error = event.get("is_error", False)
-                        # Extract text from content — may be a string, list of
-                        # content blocks, or empty/None.
                         raw_content = event.get("content", "")
+                        log.info(
+                            "[PIPE] tool_result id=%s name=%s content_type=%s content_preview=%s",
+                            tool_id, name, type(raw_content).__name__,
+                            str(raw_content)[:300],
+                        )
+                        # Extract plain text — content can be a string or
+                        # a list of {"type":"text","text":"..."} blocks.
                         if isinstance(raw_content, list):
                             result_content = " ".join(
                                 b.get("text", "") if isinstance(b, dict) else str(b)

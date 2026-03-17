@@ -229,6 +229,7 @@ class Pipeline:
 
         tool_names: dict = {}
         tool_pending: dict = {}
+        active_tools: set = set()
 
         try:
             if thought_wrapped:
@@ -260,7 +261,8 @@ class Pipeline:
                             event_type = sys_event.get("type", "")
                             log.info("[PIPE] system_event type=%s", event_type)
                             rendered = self._render_system_event(
-                                event_type, sys_event, tool_names, tool_pending
+                                event_type, sys_event, tool_names, tool_pending,
+                                active_tools,
                             )
                             if rendered:
                                 if thought_wrapped and not response_tag_sent:
@@ -282,9 +284,10 @@ class Pipeline:
                         if not chunk:
                             continue
 
-                        # Filter out SDK "Executing tool..." status lines
-                        stripped = chunk.strip()
-                        if stripped.startswith("Executing ") and stripped.endswith("..."):
+                        # Suppress text while tools are executing —
+                        # the SDK emits bare tool names and
+                        # "Executing tool_name..." as text deltas.
+                        if active_tools:
                             continue
 
                         if thought_wrapped:
@@ -332,6 +335,7 @@ class Pipeline:
         event: dict,
         tool_names: dict,
         tool_pending: dict,
+        active_tools: set,
     ) -> Optional[str]:
         """Render a system_event into display text (tool blocks, task progress)."""
 
@@ -362,6 +366,7 @@ class Pipeline:
             name = event.get("name", "")
             if tool_id:
                 tool_names[tool_id] = name
+                active_tools.add(tool_id)
             tool_args = json.dumps(
                 event.get("input", event.get("arguments", {})),
                 ensure_ascii=False,
@@ -370,11 +375,17 @@ class Pipeline:
 
         elif event_type == "tool_result":
             tool_id = event.get("tool_use_id", "")
+            active_tools.discard(tool_id)
             pending = tool_pending.pop(tool_id, {})
             name = pending.get("name", tool_names.get(tool_id, ""))
             args = pending.get("args", "{}")
             is_error = event.get("is_error", False)
             raw_content = event.get("content", "") or event.get("output", "") or event.get("result", "")
+            log.info(
+                "[PIPE] tool_result id=%s name=%s content_type=%s content_preview=%s",
+                tool_id, name, type(raw_content).__name__,
+                str(raw_content)[:300],
+            )
             result_content = self._extract_tool_result_text(raw_content)
             if not result_content and is_error:
                 result_content = event.get("error", "Tool execution failed")
