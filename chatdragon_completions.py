@@ -1,0 +1,329 @@
+"""
+title: Development Assistant (Completions)
+author: claude-code-openai-wrapper
+version: 0.1.0
+description: .
+    Session-aware chat completions pipe via /v1/chat/completions.
+    Uses Open WebUI chat_id as session_id for conversation continuity and SDK auto-compaction.
+    Features:
+    - User context injection (mlm_username from metadata.user_id or user.name)
+    - Credential fetching from Open WebUI API for MCP authentication
+    - thought_wrapped mode: wraps thinking in <thought> tags and detects <response> tag
+license: MIT
+"""
+
+import html
+import json
+import logging
+import re
+from typing import Iterator, Optional
+
+import httpx
+from pydantic import BaseModel, Field
+
+log = logging.getLogger(__name__)
+
+
+class Pipeline:
+    class Valves(BaseModel):
+        BASE_URL: str = Field(
+            default="http://host.docker.internal:17995",
+            description="Claude Code Gateway server URL",
+        )
+        API_KEY: str = Field(
+            default="",
+            description="API key for the gateway server (leave empty if not required)",
+        )
+        MODEL: str = Field(
+            default="sonnet",
+            description="Claude model to use (e.g. sonnet, opus, haiku)",
+        )
+        TIMEOUT: int = Field(
+            default=300,
+            description="Request timeout in seconds",
+        )
+        # Context injection settings
+        INJECT_USER_CONTEXT: bool = Field(
+            default=True,
+            description="Inject user context (username as mlm_username) into prompt",
+        )
+        INJECT_CREDENTIALS: bool = Field(
+            default=True,
+            description="Fetch and inject credentials from Open WebUI for MCP authentication",
+        )
+        OPEN_WEBUI_URL: str = Field(
+            default="http://host.docker.internal:10088",
+            description="Open WebUI base URL for fetching credentials",
+        )
+        # Thought wrapped mode settings
+        OUTPUT_FORMAT: str = Field(
+            default="default",
+            description="Output format: 'default' (stream as-is) or 'thought_wrapped' (wrap thinking in <thought> tags)",
+        )
+        THOUGHT_WRAPPED_INSTRUCTION: bool = Field(
+            default=True,
+            description="Inject instruction for model to output <response> tag when done thinking",
+        )
+
+    def __init__(self):
+        self.valves = self.Valves()
+        self._extra_headers: dict = {}
+
+    def pipes(self) -> list:
+        return [
+            {
+                "id": "chatdragon-completions",
+                "name": "Chatdragon Completions",
+            }
+        ]
+
+    # ------------------------------------------------------------------
+    # Context injection
+    # ------------------------------------------------------------------
+
+    def _inject_context(
+        self,
+        text: str,
+        __user__: Optional[dict],
+        user_id: Optional[str] = None,
+        cookies: Optional[dict] = None,
+        dscrowd_token: Optional[str] = None,
+        mlm_username: Optional[str] = None,
+    ) -> str:
+        """Inject user and credential context into the prompt text."""
+        context_parts = []
+
+        if self.valves.INJECT_USER_CONTEXT:
+            if mlm_username:
+                context_parts.append(f"<mlm_username>{mlm_username}</mlm_username>")
+            elif __user__:
+                user_name = __user__.get("name", "")
+                if user_name:
+                    context_parts.append(f"<mlm_username>{user_name}</mlm_username>")
+
+        if self.valves.INJECT_CREDENTIALS:
+            if dscrowd_token:
+                context_parts.append(f"<dscrowd.token_key>{dscrowd_token}</dscrowd.token_key>")
+            elif cookies:
+                token = cookies.get("dscrowd.token_key")
+                if token:
+                    context_parts.append(f"<dscrowd.token_key>{token}</dscrowd.token_key>")
+
+        if context_parts:
+            return text + "\n\n" + "\n".join(context_parts)
+        return text
+
+    def _get_thought_wrapped_instruction(self) -> str:
+        return """
+
+## 검색 완료 후 답변 작성
+
+모든 검색이 완료되면 답변 작성을 시작하기 직전에 반드시 `<response>` 토큰을 출력한다. 이 토큰은 검색 단계가 끝났음을 명시적으로 나타낸다.
+
+```
+<response>
+```
+
+이 후 검색 결과를 바탕으로 답변을 작성한다."""
+
+    def _wrap_thought_content(self, text: str) -> str:
+        if not text:
+            return text
+        if "<response>" in text:
+            parts = text.split("<response>", 1)
+            thought_content = parts[0].strip()
+            response_content = parts[1].strip() if len(parts) > 1 else ""
+            return f"<thought>\n{thought_content}\n</thought>\n\n{response_content}"
+        return f"<thought>\n{text}\n</thought>"
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    def pipe(
+        self,
+        user_message: str,
+        model_id: str,
+        messages: list,
+        body: dict,
+    ):
+        __user__ = body.get("user", {})
+        __user_id__ = __user__.get("id", "")
+        __metadata__ = body.get("metadata", {})
+        __task__ = __metadata__.get("task")
+
+        meta_headers = __metadata__.get("headers", {})
+
+        self._extra_headers = {}
+
+        dscrowd_token = meta_headers.get("x-cookie-dscrowd.token_key", "")
+        if dscrowd_token:
+            self._extra_headers["X-Cookie-dscrowd.token_key"] = dscrowd_token
+
+        owui_username = meta_headers.get("x-openwebui-user-name", "")
+        if not owui_username and __user__:
+            owui_username = __user__.get("name", "") or __user__.get("email", "")
+        if owui_username:
+            self._extra_headers["X-OpenWebUI-User-Name"] = owui_username
+
+        __cookies__ = body.get("cookies", {})
+        if __cookies__ and not dscrowd_token:
+            dscrowd_token = __cookies__.get("dscrowd.token_key", "")
+            if dscrowd_token:
+                self._extra_headers["X-Cookie-dscrowd.token_key"] = dscrowd_token
+
+        if not messages:
+            return "No messages provided."
+
+        # Build messages list — inject context into the last user message
+        messages = list(messages)
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                content = messages[i].get("content", "")
+                if isinstance(content, str):
+                    content = self._inject_context(
+                        content,
+                        __user__,
+                        __user_id__,
+                        __cookies__,
+                        dscrowd_token=dscrowd_token or None,
+                        mlm_username=owui_username or None,
+                    )
+                    if (
+                        self.valves.OUTPUT_FORMAT == "thought_wrapped"
+                        and self.valves.THOUGHT_WRAPPED_INSTRUCTION
+                        and not __task__
+                    ):
+                        content += self._get_thought_wrapped_instruction()
+                    messages[i] = {**messages[i], "content": content}
+                break
+
+        use_stream = body.get("stream", True)
+        chat_id = __metadata__.get("chat_id", "")
+
+        payload = {
+            "model": self.valves.MODEL,
+            "messages": messages,
+            "stream": use_stream,
+        }
+        if chat_id:
+            payload["session_id"] = chat_id
+
+        if use_stream:
+            return self._stream(payload, __task__)
+        else:
+            return self._non_stream(payload, __task__)
+
+    # ------------------------------------------------------------------
+    # Streaming
+    # ------------------------------------------------------------------
+
+    def _stream(self, payload: dict, task: Optional[str]) -> Iterator[str]:
+        thought_wrapped = self.valves.OUTPUT_FORMAT == "thought_wrapped" and not task
+        thought_opened = False
+        response_tag_sent = False
+        text_buffer = ""
+        BUFFER_SIZE = 50
+        RESPONSE_TAG = "<response>"
+
+        try:
+            if thought_wrapped:
+                yield "<thought>\n"
+                thought_opened = True
+
+            url = f"{self.valves.BASE_URL.rstrip('/')}/v1/chat/completions"
+            with httpx.Client(timeout=httpx.Timeout(self.valves.TIMEOUT)) as client:
+                with client.stream("POST", url, json=payload, headers=self._make_headers()) as resp:
+                    if resp.status_code != 200:
+                        body_text = resp.read().decode()
+                        raise Exception(f"Server error ({resp.status_code}): {body_text}")
+
+                    for line in resp.iter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+
+                        try:
+                            event = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        choices = event.get("choices", [])
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {})
+                        chunk = delta.get("content", "")
+                        if not chunk:
+                            continue
+
+                        if thought_wrapped:
+                            if response_tag_sent:
+                                yield chunk
+                            else:
+                                text_buffer += chunk
+                                if RESPONSE_TAG in text_buffer:
+                                    idx = text_buffer.index(RESPONSE_TAG)
+                                    before = text_buffer[:idx]
+                                    after = text_buffer[idx + len(RESPONSE_TAG):]
+                                    if before:
+                                        yield before
+                                    yield "\n</thought>\n\n"
+                                    response_tag_sent = True
+                                    if after:
+                                        yield after
+                                    text_buffer = ""
+                                elif len(text_buffer) > BUFFER_SIZE:
+                                    safe_len = len(text_buffer) - len(RESPONSE_TAG)
+                                    if safe_len > 0:
+                                        yield text_buffer[:safe_len]
+                                        text_buffer = text_buffer[safe_len:]
+                        else:
+                            yield chunk
+
+        except Exception as e:
+            log.error("Stream error: %s", e)
+            yield f"\n\nError: {e}"
+        finally:
+            if thought_wrapped and thought_opened and not response_tag_sent:
+                if text_buffer:
+                    yield text_buffer
+                yield "\n</thought>"
+
+    # ------------------------------------------------------------------
+    # Non-streaming
+    # ------------------------------------------------------------------
+
+    def _non_stream(self, payload: dict, task: Optional[str]) -> str:
+        url = f"{self.valves.BASE_URL.rstrip('/')}/v1/chat/completions"
+        try:
+            with httpx.Client(timeout=httpx.Timeout(self.valves.TIMEOUT)) as client:
+                resp = client.post(url, json=payload, headers=self._make_headers())
+                if resp.status_code != 200:
+                    return f"Error: Server error ({resp.status_code}): {resp.text}"
+
+                data = resp.json()
+                choices = data.get("choices", [])
+                if not choices:
+                    return "Error: No response from server"
+
+                content = choices[0].get("message", {}).get("content", "")
+                if self.valves.OUTPUT_FORMAT == "thought_wrapped" and not task:
+                    content = self._wrap_thought_content(content)
+                return content
+        except Exception as e:
+            log.error("Non-stream error: %s", e)
+            return f"Error: {e}"
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _make_headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.valves.API_KEY:
+            headers["Authorization"] = f"Bearer {self.valves.API_KEY}"
+        headers.update(self._extra_headers)
+        return headers
