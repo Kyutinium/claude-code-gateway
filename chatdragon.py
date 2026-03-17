@@ -593,17 +593,17 @@ class Pipeline:
                             result_content = f"Result truncated ({chars} chars)"
                         result_content = result_content[:10000]
                         esc_name = html.escape(name)
-                        # html.escape(quote=False) escapes &, <, > but leaves
-                        # " and ' alone.  We then only escape ' for the
-                        # single-quote wrapper.  This avoids &quot; which broke
-                        # Open WebUI's parser.
-                        esc_args = html.escape(args, quote=False).replace("'", "&#39;")
-                        esc_result = html.escape(result_content, quote=False).replace("'", "&#39;")
+                        esc_args = html.escape(args)
+                        esc_result = html.escape(result_content)
+                        log.info(
+                            "[PIPE] tool_result rendered: name=%s result_len=%d esc_result_preview=%s",
+                            name, len(result_content), esc_result[:200],
+                        )
                         yield (
                             f'\n\n<details type="tool_calls"'
                             f' name="{esc_name}"'
-                            f" arguments='{esc_args}'"
-                            f" result='{esc_result}'"
+                            f' arguments="{esc_args}"'
+                            f' result="{esc_result}"'
                             f' done="true">\n'
                             f"<summary>Tool: {esc_name}</summary>\n"
                             f"</details>\n\n"
