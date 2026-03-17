@@ -263,13 +263,19 @@ class Pipeline:
 
         tool_names: dict = {}
         tool_pending: dict = {}
+        stream_done = False
         try:
             if thought_wrapped:
                 yield "<thought>\n"
                 thought_opened = True
 
             url = f"{self.valves.BASE_URL.rstrip('/')}/v1/chat/completions"
-            with httpx.Client(timeout=httpx.Timeout(self.valves.TIMEOUT)) as client:
+            # Use a generous read timeout for streaming: the SDK may pause
+            # for extended periods during auto-compact or long tool runs.
+            stream_timeout = httpx.Timeout(
+                connect=30.0, read=None, write=30.0, pool=30.0,
+            )
+            with httpx.Client(timeout=stream_timeout) as client:
                 with client.stream("POST", url, json=payload, headers=self._make_headers()) as resp:
                     if resp.status_code != 200:
                         body_text = resp.read().decode()
@@ -280,6 +286,7 @@ class Pipeline:
                             continue
                         data_str = line[6:]
                         if data_str.strip() == "[DONE]":
+                            stream_done = True
                             break
 
                         try:
@@ -350,6 +357,10 @@ class Pipeline:
                                         text_buffer = text_buffer[safe_len:]
                         else:
                             yield chunk
+
+                    if not stream_done:
+                        log.warning("[STREAM] Stream ended without [DONE] marker")
+                        yield "\n\n[Warning: Response may be incomplete]"
 
         except Exception as e:
             log.error("Stream error: %s", e)
