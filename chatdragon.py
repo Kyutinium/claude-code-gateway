@@ -42,16 +42,18 @@ def _is_tool_noise(text: str) -> bool:
 def _safe_attr(value: str) -> str:
     """Sanitize a string for use inside a double-quoted HTML attribute.
 
-    Escapes ``&`` first so that pre-existing HTML entities (e.g. ``&quot;``
-    in Confluence content) are neutralised and cannot be decoded by the
-    browser into characters that break the attribute boundary.
+    Open WebUI reads raw attribute values without decoding HTML entities,
+    so we use plain character substitution instead of entity encoding.
+    ``&`` is neutralised so pre-existing entities in Confluence content
+    (e.g. ``&quot;``) cannot be decoded by the browser into ``"`` which
+    would break the attribute boundary.
     """
     return (
         value
-        .replace("&", "&amp;")   # must be first to avoid double-escaping
-        .replace('"', "&quot;")  # prevent closing the attribute
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+        .replace("&", "+")   # neutralise entities (must be first)
+        .replace('"', "'")   # prevent closing the attribute
+        .replace("<", "[")
+        .replace(">", "]")
         .replace("\n", " ")
         .replace("\r", "")
     )
