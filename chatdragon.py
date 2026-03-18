@@ -42,12 +42,16 @@ def _is_tool_noise(text: str) -> bool:
 def _safe_attr(value: str) -> str:
     """Sanitize a string for use inside a double-quoted HTML attribute.
 
-    Open WebUI doesn't decode HTML entities in <details type="tool_calls">,
-    so replace chars that break the tag or attribute boundary directly.
+    Open WebUI reads raw attribute values without decoding HTML entities,
+    so we use plain character substitution instead of entity encoding.
+    ``&`` is neutralised so pre-existing entities in Confluence content
+    (e.g. ``&quot;``) cannot be decoded by the browser into ``"`` which
+    would break the attribute boundary.
     """
     return (
         value
-        .replace('"', "'")
+        .replace("&", "+")   # neutralise entities (must be first)
+        .replace('"', "'")   # prevent closing the attribute
         .replace("<", "[")
         .replace(">", "]")
         .replace("\n", " ")
@@ -535,6 +539,15 @@ class Pipeline:
 
                     event_type = event.get("type", "")
 
+                    if event_type not in (
+                        "response.output_text.delta",
+                        "response.output_text.done",
+                    ):
+                        log.info(
+                            "[PIPE-DEBUG] sse_event type=%s preview=%s",
+                            event_type, json.dumps(event, default=str)[:300],
+                        )
+
                     if event_type == "response.output_text.delta":
                         delta = event.get("delta", "")
                         if delta:
@@ -569,6 +582,10 @@ class Pipeline:
                     elif event_type == "response.tool_use":
                         tool_id = event.get("tool_use_id", "")
                         name = event.get("name", "")
+                        log.info(
+                            "[PIPE-DEBUG] tool_use received: id=%s name=%s event=%s",
+                            tool_id, name, json.dumps(event, default=str)[:500],
+                        )
                         if tool_id:
                             tool_names[tool_id] = name
                             active_tools.add(tool_id)
@@ -611,11 +628,7 @@ class Pipeline:
                         esc_name = html.escape(name)
                         safe_args = _safe_attr(args)
                         safe_result = _safe_attr(result_content)
-                        log.info(
-                            "[PIPE] tool_result rendered: name=%s result_len=%d preview=%s",
-                            name, len(result_content), safe_result[:200],
-                        )
-                        yield (
+                        details_tag = (
                             f'\n\n<details type="tool_calls"'
                             f' name="{esc_name}"'
                             f' arguments="{safe_args}"'
@@ -624,6 +637,31 @@ class Pipeline:
                             f"<summary>Tool: {esc_name}</summary>\n"
                             f"</details>\n\n"
                         )
+                        log.info(
+                            "[PIPE-DEBUG] tool_id=%s name=%s args_len=%d result_len=%d",
+                            tool_id, name, len(safe_args), len(safe_result),
+                        )
+                        log.info(
+                            "[PIPE-DEBUG] raw_args=%s",
+                            args[:500],
+                        )
+                        log.info(
+                            "[PIPE-DEBUG] safe_args=%s",
+                            safe_args[:500],
+                        )
+                        log.info(
+                            "[PIPE-DEBUG] result_preview=%s",
+                            result_content[:500],
+                        )
+                        log.info(
+                            "[PIPE-DEBUG] safe_result_preview=%s",
+                            safe_result[:500],
+                        )
+                        log.info(
+                            "[PIPE-DEBUG] details_tag_first_300=%s",
+                            details_tag[:300],
+                        )
+                        yield details_tag
 
                     elif event_type == "response.completed":
                         completed = True

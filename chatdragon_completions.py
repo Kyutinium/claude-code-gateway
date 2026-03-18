@@ -37,17 +37,16 @@ def _is_tool_noise(text: str) -> bool:
 def _safe_attr(value: str) -> str:
     """Sanitize a string for use inside a double-quoted HTML attribute.
 
-    Open WebUI's ``<details type="tool_calls">`` parser does NOT decode
-    HTML entities, so we cannot use ``html.escape()``.  Instead we replace
-    characters that would break the tag structure or attribute boundary:
-      "  → '   (would close the attribute)
-      <  → [   (would open a new HTML tag)
-      >  → ]   (would close a tag)
-      \\n → ' ' (multi-line attributes break many parsers)
+    Open WebUI reads raw attribute values without decoding HTML entities,
+    so we use plain character substitution instead of entity encoding.
+    ``&`` is neutralised so pre-existing entities in Confluence content
+    (e.g. ``&quot;``) cannot be decoded by the browser into ``"`` which
+    would break the attribute boundary.
     """
     return (
         value
-        .replace('"', "'")
+        .replace("&", "+")   # neutralise entities (must be first)
+        .replace('"', "'")   # prevent closing the attribute
         .replace("<", "[")
         .replace(">", "]")
         .replace("\n", " ")
@@ -287,11 +286,28 @@ class Pipeline:
                         except json.JSONDecodeError:
                             continue
 
+                        # Log every SSE event's top-level keys so we can
+                        # spot tool_use arriving in an unexpected shape.
+                        evt_keys = list(event.keys())
+                        if "system_event" in evt_keys or "choices" not in evt_keys:
+                            log.info(
+                                "[PIPE-DEBUG] sse_event keys=%s preview=%s",
+                                evt_keys, data_str[:300],
+                            )
+
                         # Handle system_event (tool_use, tool_result, task events)
                         sys_event = event.get("system_event")
                         if sys_event:
                             event_type = sys_event.get("type", "")
-                            log.info("[PIPE] system_event type=%s", event_type)
+                            log.info(
+                                "[PIPE] system_event type=%s keys=%s",
+                                event_type, list(sys_event.keys()),
+                            )
+                            if event_type in ("tool_use", "tool_result"):
+                                log.info(
+                                    "[PIPE-DEBUG] %s raw_event=%s",
+                                    event_type, json.dumps(sys_event, default=str)[:500],
+                                )
                             rendered = self._render_system_event(
                                 event_type, sys_event, tool_names, tool_pending,
                             )
@@ -424,16 +440,9 @@ class Pipeline:
                 result_content = f"Result truncated ({chars} chars)"
             result_content = result_content[:10000]
             esc_name = html.escape(name)
-            # Sanitize for HTML attribute safety: Open WebUI doesn't
-            # decode HTML entities, so we can't use html.escape().
-            # Replace chars that would break the tag or attribute boundary.
             safe_args = _safe_attr(args)
             safe_result = _safe_attr(result_content)
-            log.info(
-                "[PIPE] tool_result rendered: name=%s result_len=%d preview=%s",
-                name, len(result_content), safe_result[:200],
-            )
-            return (
+            details_tag = (
                 f'\n\n<details type="tool_calls"'
                 f' name="{esc_name}"'
                 f' arguments="{safe_args}"'
@@ -442,6 +451,31 @@ class Pipeline:
                 f"<summary>Tool: {esc_name}</summary>\n"
                 f"</details>\n\n"
             )
+            log.info(
+                "[PIPE-DEBUG] tool_id=%s name=%s args_len=%d result_len=%d",
+                tool_id, name, len(safe_args), len(safe_result),
+            )
+            log.info(
+                "[PIPE-DEBUG] raw_args=%s",
+                args[:500],
+            )
+            log.info(
+                "[PIPE-DEBUG] safe_args=%s",
+                safe_args[:500],
+            )
+            log.info(
+                "[PIPE-DEBUG] result_preview=%s",
+                result_content[:500],
+            )
+            log.info(
+                "[PIPE-DEBUG] safe_result_preview=%s",
+                safe_result[:500],
+            )
+            log.info(
+                "[PIPE-DEBUG] details_tag_first_300=%s",
+                details_tag[:300],
+            )
+            return details_tag
 
         return None
 
