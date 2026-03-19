@@ -285,6 +285,7 @@ class Pipeline:
 
         tool_names: dict = {}
         tool_pending: dict = {}
+        tool_completions: list[tuple[str, bool]] = []  # (label, is_error) for summary
         any_tool_used = False
         try:
             if thought_wrapped:
@@ -345,6 +346,7 @@ class Pipeline:
                                 )
                             rendered = self._render_system_event(
                                 event_type, sys_event, tool_names, tool_pending,
+                                tool_completions,
                             )
                             if rendered:
                                 if thought_wrapped and not response_tag_sent:
@@ -371,6 +373,13 @@ class Pipeline:
                         stripped = chunk.strip()
                         if _is_tool_noise(stripped):
                             continue
+
+                        # Flush buffered tool summary before first real text
+                        if tool_completions and not self.valves.TOOL_DISPLAY:
+                            summary = self._build_tool_summary(tool_completions)
+                            tool_completions.clear()
+                            if summary:
+                                yield summary
 
                         if thought_wrapped:
                             if response_tag_sent:
@@ -406,6 +415,12 @@ class Pipeline:
             log.error("Stream error: %s", e)
             yield f"\n\nError: {e}"
         finally:
+            # Flush any remaining tool summary (e.g. if stream ends with no text)
+            if tool_completions and not self.valves.TOOL_DISPLAY:
+                summary = self._build_tool_summary(tool_completions)
+                tool_completions.clear()
+                if summary:
+                    yield summary
             if thought_wrapped and thought_opened and not response_tag_sent:
                 if not any_tool_used and text_buffer:
                     # No tools were used and model didn't emit <response> —
@@ -423,6 +438,7 @@ class Pipeline:
         event: dict,
         tool_names: dict,
         tool_pending: dict,
+        tool_completions: list[tuple[str, bool]] | None = None,
     ) -> Optional[str]:
         """Render a system_event into display text (tool blocks, task progress)."""
 
@@ -486,6 +502,11 @@ class Pipeline:
                 return None
 
             if not self.valves.TOOL_DISPLAY:
+                label = self._tool_label(name)
+                if tool_completions is not None:
+                    tool_completions.append((label, is_error))
+                    return None
+                # Fallback if called without buffer
                 friendly = self._friendly_tool_notification(name, is_error)
                 details_tag = f"\n> {friendly}\n"
             else:
@@ -561,39 +582,80 @@ class Pipeline:
     ]
 
     @classmethod
-    def _friendly_tool_notification(cls, raw_name: str, is_error: bool = False) -> str:
-        """Build a ChatGPT-style notification with a random English suffix.
-
-        Examples:
-            mcp__mcp_router__mlm_cql  -> "✅ Finished searching MLM Confluence"
-            mcp__mcp_router__cql      -> "✅ Got results from Confluence"
-            Read                      -> "✅ Done looking through a file"
-            Bash                      -> "✅ Completed a command"
-        """
+    def _tool_label(cls, raw_name: str) -> str:
+        """Return a short, human-friendly label for a tool name."""
         lower = raw_name.lower()
-
-        # Built-in SDK tools
         if lower in cls._BUILTIN_LABELS:
-            label = cls._BUILTIN_LABELS[lower]
-        elif lower.startswith("mcp__"):
+            return cls._BUILTIN_LABELS[lower]
+        if lower.startswith("mcp__"):
             parts = raw_name.split("__")
             tool_key = parts[-1] if len(parts) >= 3 else parts[-1]
             if tool_key.lower() in cls._MCP_LABELS:
-                label = cls._MCP_LABELS[tool_key.lower()]
-            else:
-                # Unknown MCP tool – humanize the raw suffix
-                label = tool_key.replace("_", " ")
-        else:
-            label = raw_name
+                return cls._MCP_LABELS[tool_key.lower()]
+            return tool_key.replace("_", " ")
+        return raw_name
 
+    @classmethod
+    def _friendly_tool_notification(cls, raw_name: str, is_error: bool = False) -> str:
+        """Build a single-tool notification (fallback when buffer is unavailable)."""
+        label = cls._tool_label(raw_name)
         if is_error:
-            icon = "❌"
             template = random.choice(cls._ERROR_TEMPLATES)
-        else:
-            icon = "✅"
-            template = random.choice(cls._DONE_TEMPLATES)
+            return f"❌ {template.format(label=label)}"
+        template = random.choice(cls._DONE_TEMPLATES)
+        return f"✅ {template.format(label=label)}"
 
-        return f"{icon} {template.format(label=label)}"
+    @classmethod
+    def _build_tool_summary(cls, completions: list[tuple[str, bool]]) -> str:
+        """Build a collapsible one-line summary from buffered tool completions.
+
+        Renders as a single `<details>` block:
+            ✅ Searched 5 sources ▾
+              - MLM Confluence
+              - Confluence
+              ...
+        """
+        if not completions:
+            return ""
+
+        ok = [label for label, err in completions if not err]
+        failed = [label for label, err in completions if err]
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique_ok: list[str] = []
+        for label in ok:
+            if label not in seen:
+                seen.add(label)
+                unique_ok.append(label)
+        unique_fail: list[str] = []
+        for label in failed:
+            if label not in seen:
+                seen.add(label)
+                unique_fail.append(label)
+
+        total = len(completions)
+        errors = len(failed)
+
+        # Summary line
+        if errors == 0:
+            template = random.choice(cls._DONE_TEMPLATES)
+            summary = f"✅ {template.format(label=f'{total} sources')}"
+        elif errors == total:
+            summary = f"❌ Failed to search {total} sources"
+        else:
+            template = random.choice(cls._DONE_TEMPLATES)
+            summary = f"⚠️ {template.format(label=f'{total} sources')} ({errors} failed)"
+
+        # Detail lines
+        lines: list[str] = []
+        for label in unique_ok:
+            lines.append(f"  - ✅ {label}")
+        for label in unique_fail:
+            lines.append(f"  - ❌ {label}")
+        detail = "\n".join(lines)
+
+        return f"\n<details>\n<summary>{summary}</summary>\n\n{detail}\n</details>\n\n"
 
     @staticmethod
     def _extract_tool_result_text(raw_content) -> str:
