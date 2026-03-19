@@ -13,14 +13,16 @@ from src.constants import DEFAULT_MODEL
 class TestSystemPromptFormats:
     """Test that system prompt formats work correctly with new SDK."""
 
-    def test_text_system_prompt_format(self):
-        """Test text-based system prompt format."""
+    def test_preset_append_system_prompt_format(self):
+        """Test preset-based system prompt with append field."""
         options = ClaudeAgentOptions(
-            max_turns=1, system_prompt={"type": "text", "text": "You are a helpful assistant."}
+            max_turns=1,
+            system_prompt={"type": "preset", "preset": "claude_code", "append": "You are a helpful assistant."},
         )
         assert options.system_prompt is not None
         assert isinstance(options.system_prompt, dict)
-        assert options.system_prompt["type"] == "text"
+        assert options.system_prompt["type"] == "preset"
+        assert options.system_prompt["append"] == "You are a helpful assistant."
 
     def test_preset_system_prompt_format(self):
         """Test preset-based system prompt format."""
@@ -147,7 +149,7 @@ class TestClaudeAgentOptionsAllParameters:
         """Test creating options with system_prompt, model, max_turns, allowed_tools,
         disallowed_tools, permission_mode, cwd, and resume all set simultaneously."""
         options = ClaudeAgentOptions(
-            system_prompt={"type": "text", "text": "Be concise."},
+            system_prompt={"type": "preset", "preset": "claude_code", "append": "Be concise."},
             model="sonnet",
             max_turns=10,
             allowed_tools=["Read", "Write", "Bash"],
@@ -156,7 +158,7 @@ class TestClaudeAgentOptionsAllParameters:
             cwd="/tmp",
             resume="session-abc-123",
         )
-        assert options.system_prompt == {"type": "text", "text": "Be concise."}
+        assert options.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be concise."}
         assert options.model == "sonnet"
         assert options.max_turns == 10
         assert options.allowed_tools == ["Read", "Write", "Bash"]

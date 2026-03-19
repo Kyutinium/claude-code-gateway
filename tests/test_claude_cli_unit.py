@@ -464,7 +464,7 @@ class TestClaudeCodeCLIRunCompletion:
 
             assert len(captured_options) == 1
             opts = captured_options[0]
-            assert opts.system_prompt == {"type": "text", "text": "You are helpful"}
+            assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "You are helpful"}
 
     @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):
@@ -655,9 +655,9 @@ class TestBuildSdkOptions:
         assert opts.system_prompt == {"type": "preset", "preset": "claude_code"}
 
     def test_custom_system_prompt(self, cli_instance):
-        """When system_prompt given, text type is used."""
+        """When system_prompt given, preset with append is used."""
         opts = cli_instance._build_sdk_options(system_prompt="Be concise")
-        assert opts.system_prompt == {"type": "text", "text": "Be concise"}
+        assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be concise"}
 
     def test_thinking_mode_adaptive(self, cli_instance):
         """Adaptive thinking mode sets type=adaptive."""

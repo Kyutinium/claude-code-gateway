@@ -294,7 +294,7 @@ class ClaudeCodeCLI:
         if model:
             options.model = model
         if system_prompt:
-            options.system_prompt = {"type": "text", "text": system_prompt}
+            options.system_prompt = {"type": "preset", "preset": "claude_code", "append": system_prompt}
         else:
             options.system_prompt = {"type": "preset", "preset": "claude_code"}
         if permission_mode:
