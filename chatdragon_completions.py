@@ -97,6 +97,10 @@ class Pipeline:
             default=True,
             description="Inject instruction for model to output <response> tag when done thinking",
         )
+        TOOL_DISPLAY: str = Field(
+            default="detailed",
+            description="Tool display mode: 'detailed' (full <details> block with args/result) or 'simple' (short status message)",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -452,17 +456,22 @@ class Pipeline:
                 result_content = f"Result truncated ({chars} chars)"
             result_content = result_content[:10000]
             esc_name = html.escape(name)
-            safe_args = _safe_attr(args)
-            safe_result = _safe_attr(result_content)
-            details_tag = (
-                f'\n\n<details type="tool_calls"'
-                f' name="{esc_name}"'
-                f' arguments="{safe_args}"'
-                f' result="{safe_result}"'
-                f' done="true">\n'
-                f"<summary>Tool: {esc_name}</summary>\n"
-                f"</details>\n\n"
-            )
+
+            if self.valves.TOOL_DISPLAY == "simple":
+                status = "error" if is_error else "done"
+                details_tag = f"\n> **Tool**: {esc_name} — {status}\n"
+            else:
+                safe_args = _safe_attr(args)
+                safe_result = _safe_attr(result_content)
+                details_tag = (
+                    f'\n\n<details type="tool_calls"'
+                    f' name="{esc_name}"'
+                    f' arguments="{safe_args}"'
+                    f' result="{safe_result}"'
+                    f' done="true">\n'
+                    f"<summary>Tool: {esc_name}</summary>\n"
+                    f"</details>\n\n"
+                )
             log.info(
                 "[PIPE-DEBUG] tool_id=%s name=%s args_len=%d result_len=%d",
                 tool_id, name, len(safe_args), len(safe_result),
