@@ -514,86 +514,86 @@ class Pipeline:
         return None
 
     # ── Friendly tool notification helpers ──────────────────────────────
-    # Maps raw MCP tool-name suffix → (Korean display label, action verb).
-    _MCP_LABELS: dict[str, tuple[str, str]] = {
-        "mlm_cql": ("MLM Confluence", "검색"),
-        "cql": ("Confluence", "검색"),
-        "basic_knowledge": ("기본 지식", "조회"),
-        "jira_search": ("Jira", "검색"),
-        "jira_issue": ("Jira 이슈", "조회"),
-        "web_search": ("웹", "검색"),
-        "slack_search": ("Slack", "검색"),
-        "google_drive": ("Google Drive", "검색"),
+    # Maps raw MCP tool-name suffix → friendly display name.
+    _MCP_LABELS: dict[str, str] = {
+        "mlm_cql": "MLM Confluence",
+        "cql": "Confluence",
+        "basic_knowledge": "knowledge base",
+        "jira_search": "Jira",
+        "jira_issue": "Jira issue",
+        "web_search": "the web",
+        "slack_search": "Slack",
+        "google_drive": "Google Drive",
     }
 
-    # Built-in SDK tools → (Korean display label, action verb).
-    _BUILTIN_LABELS: dict[str, tuple[str, str]] = {
-        "read": ("파일", "읽기"),
-        "edit": ("파일", "수정"),
-        "write": ("파일", "작성"),
-        "bash": ("명령어", "실행"),
-        "grep": ("코드", "검색"),
-        "glob": ("파일", "탐색"),
-        "todowrite": ("작업 목록", "업데이트"),
-        "webfetch": ("웹페이지", "조회"),
-        "websearch": ("웹", "검색"),
-        "notebookedit": ("노트북", "수정"),
+    # Built-in SDK tools → friendly display name.
+    _BUILTIN_LABELS: dict[str, str] = {
+        "read": "a file",
+        "edit": "a file",
+        "write": "a file",
+        "bash": "a command",
+        "grep": "the codebase",
+        "glob": "files",
+        "todowrite": "the task list",
+        "webfetch": "a webpage",
+        "websearch": "the web",
+        "notebookedit": "a notebook",
     }
 
-    # Completion suffixes – randomly picked so repeated calls feel natural.
-    _DONE_SUFFIXES: list[str] = [
-        "을(를) 완료했습니다",
-        "을(를) 마쳤습니다",
-        "을(를) 끝냈습니다",
-        "이(가) 완료되었습니다",
-        "을(를) 수행했습니다",
-        "을(를) 처리했습니다",
-        "결과를 가져왔습니다",
-        "을(를) 진행했습니다",
-        "작업을 마무리했습니다",
-        "을(를) 확인했습니다",
+    # Completion templates – "{label}" is replaced with the tool's display name.
+    _DONE_TEMPLATES: list[str] = [
+        "Finished searching {label}",
+        "Done looking through {label}",
+        "Completed {label} search",
+        "Searched {label} successfully",
+        "Got results from {label}",
+        "Pulled data from {label}",
+        "Wrapped up {label} lookup",
+        "{label} search complete",
+        "Retrieved results from {label}",
+        "All done with {label}",
     ]
 
-    _ERROR_SUFFIXES: list[str] = [
-        "중 오류가 발생했습니다",
-        "에 실패했습니다",
-        "을(를) 완료하지 못했습니다",
+    _ERROR_TEMPLATES: list[str] = [
+        "Failed to search {label}",
+        "Something went wrong with {label}",
+        "Could not complete {label} search",
     ]
 
     @classmethod
     def _friendly_tool_notification(cls, raw_name: str, is_error: bool = False) -> str:
-        """Build a ChatGPT-style notification line with a random Korean suffix.
+        """Build a ChatGPT-style notification with a random English suffix.
 
         Examples:
-            mcp__mcp_router__mlm_cql  -> "✅ MLM Confluence 검색을(를) 완료했습니다"
-            mcp__mcp_router__cql      -> "✅ Confluence 검색결과를 가져왔습니다"
-            Read                      -> "✅ 파일 읽기을(를) 마쳤습니다"
-            Bash                      -> "✅ 명령어 실행을(를) 처리했습니다"
+            mcp__mcp_router__mlm_cql  -> "✅ Finished searching MLM Confluence"
+            mcp__mcp_router__cql      -> "✅ Got results from Confluence"
+            Read                      -> "✅ Done looking through a file"
+            Bash                      -> "✅ Completed a command"
         """
         lower = raw_name.lower()
 
         # Built-in SDK tools
         if lower in cls._BUILTIN_LABELS:
-            label, verb = cls._BUILTIN_LABELS[lower]
+            label = cls._BUILTIN_LABELS[lower]
         elif lower.startswith("mcp__"):
             parts = raw_name.split("__")
             tool_key = parts[-1] if len(parts) >= 3 else parts[-1]
             if tool_key.lower() in cls._MCP_LABELS:
-                label, verb = cls._MCP_LABELS[tool_key.lower()]
+                label = cls._MCP_LABELS[tool_key.lower()]
             else:
-                # Unknown MCP tool – use the raw suffix as-is
-                label, verb = tool_key.replace("_", " "), "실행"
+                # Unknown MCP tool – humanize the raw suffix
+                label = tool_key.replace("_", " ")
         else:
-            label, verb = raw_name, "실행"
+            label = raw_name
 
         if is_error:
             icon = "❌"
-            suffix = random.choice(cls._ERROR_SUFFIXES)
+            template = random.choice(cls._ERROR_TEMPLATES)
         else:
             icon = "✅"
-            suffix = random.choice(cls._DONE_SUFFIXES)
+            template = random.choice(cls._DONE_TEMPLATES)
 
-        return f"{icon} {label} {verb}{suffix}"
+        return f"{icon} {template.format(label=label)}"
 
     @staticmethod
     def _extract_tool_result_text(raw_content) -> str:
