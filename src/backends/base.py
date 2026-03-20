@@ -113,6 +113,7 @@ class BackendClient(Protocol):
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]: ...
 
     def parse_message(self, messages: List[Dict[str, Any]]) -> Optional[str]: ...

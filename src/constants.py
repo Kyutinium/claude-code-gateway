@@ -14,6 +14,9 @@ load_dotenv()
 # Default model (recommended for most use cases)
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "sonnet")
 
+# Custom system prompt file path (empty = use claude_code preset)
+SYSTEM_PROMPT_FILE = os.getenv("SYSTEM_PROMPT_FILE", "")
+
 # API Configuration
 DEFAULT_MAX_TURNS = int(os.getenv("DEFAULT_MAX_TURNS", "10"))
 DEFAULT_TIMEOUT_MS = int(os.getenv("MAX_TIMEOUT", "600000"))  # 10 minutes

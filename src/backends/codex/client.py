@@ -728,6 +728,7 @@ class CodexCLI:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Spawn Codex, stream JSONL, and yield normalized internal chunks.
 

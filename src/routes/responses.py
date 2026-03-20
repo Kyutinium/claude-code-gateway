@@ -137,9 +137,12 @@ async def _responses_streaming_preflight(
         resume_id = session.provider_session_id or session_id if not is_new_session else None
         next_turn = session.turn_counter + 1
 
-        # Tag backend on first turn
+        # Tag backend on first turn and snapshot base system prompt
         if is_new_session:
             session.backend = resolved.backend
+            from src.system_prompt import get_system_prompt
+
+            session.base_system_prompt = get_system_prompt()  # None = preset mode
 
     except Exception:
         session.lock.release()
@@ -154,6 +157,7 @@ async def _responses_streaming_preflight(
             prompt=prompt,
             model=resolved.provider_model,
             system_prompt=system_prompt if is_new_session else None,
+            _custom_base=session.base_system_prompt,
             permission_mode=PERMISSION_MODE_BYPASS,
             mcp_servers=get_mcp_servers() if resolved.backend == "claude" else None,
             session_id=session_id if is_new_session else None,
@@ -381,9 +385,12 @@ async def create_response(
             resume_id = session.provider_session_id or session_id if not is_new_session else None
             next_turn = session.turn_counter + 1
 
-            # Tag backend on first turn
+            # Tag backend on first turn and snapshot base system prompt
             if is_new_session:
                 session.backend = resolved.backend
+                from src.system_prompt import get_system_prompt
+
+                session.base_system_prompt = get_system_prompt()  # None = preset mode
 
             # Execute backend
             chunks = []
@@ -392,6 +399,7 @@ async def create_response(
                     prompt=prompt,
                     model=resolved.provider_model,
                     system_prompt=system_prompt if is_new_session else None,
+                    _custom_base=session.base_system_prompt,
                     permission_mode=PERMISSION_MODE_BYPASS,
                     mcp_servers=get_mcp_servers() if resolved.backend == "claude" else None,
                     session_id=session_id if is_new_session else None,

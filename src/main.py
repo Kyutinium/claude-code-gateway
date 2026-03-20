@@ -153,6 +153,12 @@ async def lifespan(app: FastAPI):
     else:
         logger.info(f"✅ Claude Code authentication validated: {auth_info['method']}")
 
+    # Load custom system prompt (if configured)
+    from src.system_prompt import load_default_prompt
+    from src.constants import SYSTEM_PROMPT_FILE
+
+    load_default_prompt(SYSTEM_PROMPT_FILE)
+
     # Discover and register backends
     discover_backends()
 

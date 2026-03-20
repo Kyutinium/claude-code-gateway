@@ -56,6 +56,7 @@ class FakeClaudeBackend:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         self.calls.append({"prompt": prompt, "resume": resume, "session_id": session_id})
         yield {"type": "assistant", "content": [{"type": "text", "text": "claude reply"}]}
@@ -115,6 +116,7 @@ class FailingCodexBackend:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         self.calls.append({"prompt": prompt, "resume": resume, "session_id": session_id})
         if self.should_fail:
@@ -187,6 +189,7 @@ class SlowCodexBackend:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         self.calls.append({"prompt": prompt, "resume": resume, "session_id": session_id})
         self.order_log.append(f"start:{prompt}")

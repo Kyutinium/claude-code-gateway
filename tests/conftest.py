@@ -189,6 +189,7 @@ class FakeCodexBackend:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         self.calls.append(
             {"prompt": prompt, "resume": resume, "model": model, "session_id": session_id}

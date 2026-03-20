@@ -59,6 +59,7 @@ class Session:
     last_accessed: datetime = field(default_factory=_utcnow)
     expires_at: Optional[datetime] = field(default=None)
     turn_counter: int = 0
+    base_system_prompt: Optional[str] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:

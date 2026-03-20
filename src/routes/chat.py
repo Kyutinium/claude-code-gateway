@@ -179,6 +179,12 @@ async def _streaming_session_preflight(
         session.add_messages(request.messages)
         if is_new:
             session.backend = resolved.backend
+            # Snapshot the global base prompt so later admin changes
+            # don't affect this session.  Only the base is stored;
+            # per-request sys_prompt is passed separately to the backend.
+            from src.system_prompt import get_system_prompt
+
+            session.base_system_prompt = get_system_prompt()  # None = preset mode
 
     except Exception:
         # On any failure, release the lock before re-raising
@@ -196,6 +202,7 @@ async def _streaming_session_preflight(
             prompt=prompt,
             model=options.get("model"),
             system_prompt=sys_prompt if is_new else None,
+            _custom_base=session.base_system_prompt,
             permission_mode=options.get("permission_mode"),
             mcp_servers=options.get("mcp_servers"),
             allowed_tools=options.get("allowed_tools"),
@@ -273,11 +280,15 @@ async def generate_streaming_response(
             session.add_messages(request.messages)
             if is_new:
                 session.backend = resolved.backend
+                from src.system_prompt import get_system_prompt
+
+                session.base_system_prompt = get_system_prompt()  # None = preset mode
 
             chunk_source = backend.run_completion(
                 prompt=prompt,
                 model=options.get("model"),
                 system_prompt=sys_prompt if is_new else None,
+                _custom_base=session.base_system_prompt,
                 permission_mode=options.get("permission_mode"),
                 mcp_servers=options.get("mcp_servers"),
                 allowed_tools=options.get("allowed_tools"),
@@ -461,12 +472,16 @@ async def chat_completions(
                     session.add_messages(request_body.messages)
                     if is_new:
                         session.backend = resolved.backend
+                        from src.system_prompt import get_system_prompt
+
+                        session.base_system_prompt = get_system_prompt()  # None = preset mode
 
                     chunks = []
                     async for chunk in backend.run_completion(
                         prompt=prompt,
                         model=options.get("model"),
                         system_prompt=sys_prompt if is_new else None,
+                        _custom_base=session.base_system_prompt,
                         permission_mode=options.get("permission_mode"),
                         mcp_servers=options.get("mcp_servers"),
                         allowed_tools=options.get("allowed_tools"),

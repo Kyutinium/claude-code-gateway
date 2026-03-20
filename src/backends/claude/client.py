@@ -271,6 +271,8 @@ class ClaudeCodeCLI:
         elif session_id:
             options.extra_args["session-id"] = session_id
 
+    _UNSET = object()  # sentinel for _custom_base default
+
     def _build_sdk_options(
         self,
         model: Optional[str] = None,
@@ -283,6 +285,7 @@ class ClaudeCodeCLI:
         mcp_servers: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
         resume: Optional[str] = None,
+        _custom_base: object = _UNSET,
     ) -> ClaudeAgentOptions:
         """Build ClaudeAgentOptions with common parameters."""
         options = ClaudeAgentOptions(max_turns=max_turns, cwd=self.cwd, setting_sources=["project"])
@@ -293,7 +296,22 @@ class ClaudeCodeCLI:
 
         if model:
             options.model = model
-        if system_prompt:
+        # Resolve the custom base prompt.  When _custom_base is the sentinel
+        # (_UNSET) the caller did not provide a frozen value so we read the
+        # current global state (appropriate for stateless / first-turn calls).
+        # When it is explicitly ``None`` the session was created in preset mode;
+        # when it is a string the session was created in custom-base mode.
+        if _custom_base is self._UNSET:
+            from src.system_prompt import get_system_prompt
+
+            custom_base = get_system_prompt()
+        else:
+            custom_base = _custom_base
+
+        if custom_base:
+            full = custom_base + ("\n\n" + system_prompt if system_prompt else "")
+            options.system_prompt = full
+        elif system_prompt:
             options.system_prompt = {"type": "preset", "preset": "claude_code", "append": system_prompt}
         else:
             options.system_prompt = {"type": "preset", "preset": "claude_code"}
@@ -443,6 +461,7 @@ class ClaudeCodeCLI:
         permission_mode: Optional[str] = None,
         output_format: Optional[Dict[str, Any]] = None,
         mcp_servers: Optional[Dict[str, Any]] = None,
+        **_extra,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run a single-use SDK query and yield converted message dicts.
 
@@ -460,6 +479,7 @@ class ClaudeCodeCLI:
                     system_prompt=system_prompt,
                     max_turns=max_turns,
                     allowed_tools=allowed_tools,
+                    _custom_base=_extra.get("_custom_base", self._UNSET),
                     disallowed_tools=disallowed_tools,
                     permission_mode=permission_mode,
                     output_format=output_format,

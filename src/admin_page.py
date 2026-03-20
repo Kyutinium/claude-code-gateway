@@ -122,7 +122,7 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
         <button :class="{ active: tab === 'ratelimits' }" @click="tab='ratelimits'; loadRateLimits()">Rate Limits</button>
         <button :class="{ active: tab === 'files' }" @click="tab='files'; loadFiles()">Workspace</button>
         <button :class="{ active: tab === 'sessions' }" @click="tab='sessions'; loadSummary()">Sessions</button>
-        <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig(); loadRuntimeConfig()">Config</button>
+        <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig(); loadRuntimeConfig(); loadSystemPrompt()">Config</button>
       </nav>
 
       <!-- Dashboard Tab -->
@@ -433,6 +433,38 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
           </table>
         </div>
 
+        <!-- System Prompt Editor -->
+        <div class="card" style="margin-bottom:1rem">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.75rem">
+            <h3 style="margin:0">System Prompt
+              <span x-show="systemPrompt.mode === 'preset'" class="badge" style="font-size:0.65rem">preset</span>
+              <span x-show="systemPrompt.mode === 'file'" class="badge badge-warn" style="font-size:0.65rem">file default</span>
+              <span x-show="systemPrompt.mode === 'custom'" class="badge badge-ok" style="font-size:0.65rem">custom override</span>
+            </h3>
+            <div style="display:flex; gap:0.5rem; align-items:center">
+              <span style="font-size:0.75rem; color:var(--text-muted)" x-text="systemPrompt.char_count + ' chars'"></span>
+              <button class="btn btn-sm btn-ghost" @click="resetSystemPrompt()"
+                x-show="systemPrompt.mode === 'custom'">Reset</button>
+              <button class="btn btn-sm btn-ghost" @click="loadSystemPrompt()">Refresh</button>
+            </div>
+          </div>
+          <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.75rem">
+            Custom system prompt replaces the <code>claude_code</code> preset. Changes only affect <strong>new sessions</strong>.
+          </p>
+          <textarea x-model="systemPromptText"
+            style="width:100%; min-height:200px; max-height:500px; font-family:monospace; font-size:0.8rem;
+              background:var(--bg-card); color:var(--text); border:1px solid var(--border); border-radius:4px;
+              padding:8px; resize:vertical"
+            placeholder="Leave empty to use claude_code preset..."></textarea>
+          <div style="margin-top:0.5rem; display:flex; gap:0.5rem">
+            <button class="btn btn-sm" @click="saveSystemPrompt()"
+              :disabled="!systemPromptText.trim()">Save</button>
+            <span style="font-size:0.75rem; color:var(--text-muted); align-self:center"
+              x-show="systemPromptText.trim()"
+              x-text="systemPromptText.trim().length + ' chars'"></span>
+          </div>
+        </div>
+
         <div class="grid-2">
           <div class="card">
             <h3>Runtime</h3>
@@ -507,6 +539,8 @@ function adminApp() {
     expandedSession: null,
     sessionMessages: null,
     runtimeConfig: {},
+    systemPrompt: { mode: 'preset', prompt: null, default_prompt: null, char_count: 0 },
+    systemPromptText: '',
 
     async init() {
       // Check if already authenticated (cookie-based)
@@ -685,6 +719,37 @@ function adminApp() {
       try {
         const r = await this.api('/admin/api/runtime-config/reset', { method: 'POST' });
         if (r.ok) { this.showToast('All settings reset', 'ok'); await this.loadRuntimeConfig(); }
+      } catch(e) {}
+    },
+
+    // --- System Prompt ---
+    async loadSystemPrompt() {
+      try {
+        const r = await this.api('/admin/api/system-prompt');
+        if (r.ok) {
+          const d = await r.json();
+          this.systemPrompt = d;
+          this.systemPromptText = d.prompt || '';
+        }
+      } catch(e) {}
+    },
+    async saveSystemPrompt() {
+      const text = this.systemPromptText.trim();
+      if (!text) { this.showToast('Prompt cannot be empty. Use Reset instead.', 'err'); return; }
+      try {
+        const r = await this.api('/admin/api/system-prompt', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ prompt: text })
+        });
+        if (r.ok) { this.showToast('System prompt updated', 'ok'); await this.loadSystemPrompt(); }
+        else { const d = await r.json(); this.showToast(d.error || 'Update failed', 'err'); }
+      } catch(e) { this.showToast('Connection error', 'err'); }
+    },
+    async resetSystemPrompt() {
+      if (!confirm('Reset system prompt to default?')) return;
+      try {
+        const r = await this.api('/admin/api/system-prompt', { method: 'DELETE' });
+        if (r.ok) { this.showToast('System prompt reset', 'ok'); await this.loadSystemPrompt(); }
       } catch(e) {}
     },
 

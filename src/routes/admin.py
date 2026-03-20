@@ -15,6 +15,7 @@ Session delete: DELETE /admin/api/sessions/{session_id}
 Logs:           GET  /admin/api/logs
 Rate limits:    GET  /admin/api/rate-limits
 Session msgs:   GET  /admin/api/sessions/{session_id}/messages
+System prompt:  GET/PUT/DELETE /admin/api/system-prompt
 """
 
 import logging
@@ -60,6 +61,10 @@ class FileWriteRequest(BaseModel):
 class RuntimeConfigUpdate(BaseModel):
     key: str
     value: Any
+
+
+class SystemPromptUpdate(BaseModel):
+    prompt: str
 
 
 # ---------------------------------------------------------------------------
@@ -337,3 +342,50 @@ async def reset_runtime_config(
         return {"status": "reset", "key": key, "value": runtime_config.get(key)}
     runtime_config.reset_all()
     return {"status": "all_reset"}
+
+
+# ---------------------------------------------------------------------------
+# System Prompt Management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/system-prompt")
+async def get_system_prompt_endpoint(_=Depends(require_admin)):
+    """Return the current system prompt and its mode."""
+    from src.system_prompt import get_default_prompt, get_prompt_mode, get_system_prompt
+
+    prompt = get_system_prompt()
+    return {
+        "mode": get_prompt_mode(),
+        "prompt": prompt,
+        "default_prompt": get_default_prompt(),
+        "char_count": len(prompt) if prompt else 0,
+    }
+
+
+@router.put("/api/system-prompt")
+async def set_system_prompt_endpoint(
+    body: SystemPromptUpdate,
+    _=Depends(require_admin),
+):
+    """Set a custom system prompt. Only affects new sessions."""
+    from src.system_prompt import get_prompt_mode, set_system_prompt
+
+    try:
+        set_system_prompt(body.prompt)
+    except ValueError as e:
+        return JSONResponse(status_code=422, content={"error": str(e)})
+    return {
+        "status": "updated",
+        "mode": get_prompt_mode(),
+        "char_count": len(body.prompt.strip()),
+    }
+
+
+@router.delete("/api/system-prompt")
+async def reset_system_prompt_endpoint(_=Depends(require_admin)):
+    """Reset to file default or claude_code preset."""
+    from src.system_prompt import get_prompt_mode, reset_system_prompt
+
+    reset_system_prompt()
+    return {"status": "reset", "mode": get_prompt_mode()}
