@@ -16,6 +16,7 @@ import json
 import logging
 import threading
 from typing import AsyncGenerator
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field
@@ -302,7 +303,14 @@ class Pipe:
     async def _stream_responses(
         self, chat_id: str, payload: dict, instructions_hash: str,
     ) -> AsyncGenerator[str, None]:
-        """Streaming /v1/responses call with <think> wrapping."""
+        """Streaming /v1/responses call with <think> wrapping.
+
+        HTTP streaming is performed in a dedicated asyncio task so that
+        httpx / anyio cancel scopes stay task-local.  An asyncio.Queue
+        bridges the fetcher task and this async generator, preventing
+        "Attempted to exit cancel scope in a different task" errors when
+        Open WebUI consumes or closes the generator from another task.
+        """
         wrap = self.valves.WRAP_THINKING
         think_open = False
         sentinel_filter = SentinelFilter(RESPONSE_SENTINEL, replacement="\n</think>\n")
@@ -313,206 +321,254 @@ class Pipe:
         POST_SENTINEL_LIMIT = 200
         tool_names: dict[str, str] = {}
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.valves.TIMEOUT)) as client:
-            async with client.stream(
-                "POST", self._responses_url(), json=payload, headers=self._make_headers()
-            ) as resp:
-                if resp.status_code != 200:
-                    body = ""
-                    async for line in resp.aiter_lines():
-                        body += line
-                    if self._is_chain_error(resp.status_code, body):
-                        raise ChainResetError(f"{resp.status_code}: {body}")
-                    raise Exception(f"Server error ({resp.status_code}): {body}")
+        _SENTINEL = object()
+        queue: asyncio.Queue = asyncio.Queue()
 
-                completed = False
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    try:
-                        event = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
+        async def _fetch() -> None:
+            """Read the SSE stream inside its own task (cancel-scope safe)."""
+            try:
+                timeout = httpx.Timeout(
+                    connect=30.0,
+                    read=60.0,
+                    write=30.0,
+                    pool=float(self.valves.TIMEOUT),
+                )
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST",
+                        self._responses_url(),
+                        json=payload,
+                        headers=self._make_headers(),
+                    ) as resp:
+                        if resp.status_code != 200:
+                            body = ""
+                            async for line in resp.aiter_lines():
+                                body += line
+                            await queue.put(("error", resp.status_code, body))
+                            return
 
-                    event_type = event.get("type", "")
+                        async for line in resp.aiter_lines():
+                            await queue.put(("line", line))
+            except Exception as exc:
+                await queue.put(("exception", exc))
+            finally:
+                await queue.put(("done", _SENTINEL))
 
-                    # --- Text deltas (intermediate reasoning + final answer) ---
-                    if event_type == "response.output_text.delta":
-                        delta = event.get("delta", "")
-                        if delta:
-                            if wrap:
-                                # Open think block on first text
-                                if not think_open:
-                                    yield "<think>\n"
-                                    think_open = True
-                                # Sentinel filter replaces <response> with </think>
-                                filtered, just_triggered = sentinel_filter.feed(delta)
-                                if just_triggered:
-                                    # Start buffering: don't emit </think>
-                                    # replacement yet in case tools follow.
-                                    if filtered:
-                                        post_sentinel_buf.append(filtered)
-                                        post_sentinel_len += len(filtered)
-                                elif sentinel_filter.triggered:
-                                    # Post-sentinel: buffer text briefly
-                                    if filtered:
-                                        post_sentinel_buf.append(filtered)
-                                        post_sentinel_len += len(filtered)
-                                    if post_sentinel_len >= POST_SENTINEL_LIMIT:
-                                        yield "".join(post_sentinel_buf)
-                                        post_sentinel_buf.clear()
-                                        post_sentinel_len = 0
-                                elif filtered:
-                                    yield filtered
-                            else:
-                                yield delta
-                        continue
+        task = asyncio.create_task(_fetch())
 
-                    # --- Intermediate events: wrap in <think> ---
+        try:
+            completed = False
 
-                    # Tool activity after sentinel → re-absorb buffered text
-                    # into think so everything stays in one collapsible.
-                    if (
-                        wrap
-                        and sentinel_filter.triggered
-                        and event_type in ("response.tool_use", "response.tool_result")
-                    ):
-                        if post_sentinel_buf:
-                            yield "".join(post_sentinel_buf)
-                            post_sentinel_buf.clear()
-                            post_sentinel_len = 0
-                        sentinel_filter.reset()
-                        # think_open stays True, we're back inside the block
+            while True:
+                msg = await queue.get()
 
-                    if event_type == "response.tool_use":
-                        tool_id = event.get("tool_use_id", "")
-                        name = event.get("name", "")
-                        if tool_id:
-                            tool_names[tool_id] = name
+                if msg[0] == "done":
+                    break
+
+                if msg[0] == "error":
+                    _, status_code, body = msg
+                    if self._is_chain_error(status_code, body):
+                        raise ChainResetError(f"{status_code}: {body}")
+                    raise Exception(f"Server error ({status_code}): {body}")
+
+                if msg[0] == "exception":
+                    raise msg[1]
+
+                # msg[0] == "line"
+                line = msg[1]
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type", "")
+
+                # --- Text deltas (intermediate reasoning + final answer) ---
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta", "")
+                    if delta:
                         if wrap:
+                            # Open think block on first text
                             if not think_open:
                                 yield "<think>\n"
                                 think_open = True
-                            yield f"[Tool: {name}]\n"
-                        continue
-
-                    if event_type == "response.tool_result":
-                        tool_id = event.get("tool_use_id", "")
-                        tool_name = tool_names.get(tool_id, "")
-                        is_error = event.get("is_error", False)
-                        content = event.get("content", "")
-                        if wrap:
-                            if not think_open:
-                                yield "<think>\n"
-                                think_open = True
-                            prefix = "Error" if is_error else "Result"
-                            label = f"{prefix}({tool_name})" if tool_name else prefix
-                            yield f"[{label}: {str(content)[:200]}]\n"
+                            # Sentinel filter replaces <response> with </think>
+                            filtered, just_triggered = sentinel_filter.feed(delta)
+                            if just_triggered:
+                                # Start buffering: don't emit </think>
+                                # replacement yet in case tools follow.
+                                if filtered:
+                                    post_sentinel_buf.append(filtered)
+                                    post_sentinel_len += len(filtered)
+                            elif sentinel_filter.triggered:
+                                # Post-sentinel: buffer text briefly
+                                if filtered:
+                                    post_sentinel_buf.append(filtered)
+                                    post_sentinel_len += len(filtered)
+                                if post_sentinel_len >= POST_SENTINEL_LIMIT:
+                                    yield "".join(post_sentinel_buf)
+                                    post_sentinel_buf.clear()
+                                    post_sentinel_len = 0
+                            elif filtered:
+                                yield filtered
                         else:
-                            prefix = "❌" if is_error else "📎"
-                            if tool_name:
-                                escaped = html.escape(tool_name)
-                                label = f"{prefix} {escaped} — {'Error' if is_error else 'Result'}"
-                            else:
-                                label = f"{prefix} {'Error' if is_error else 'Result'}"
-                            result_text = str(content)[:500]
-                            yield f'\n<details>\n<summary>{label}</summary>\n\n````\n{result_text}\n````\n\n</details>\n'
-                        continue
+                            yield delta
+                    continue
 
-                    if event_type == "response.task_started":
-                        desc = event.get("description", "")
-                        if desc:
-                            if wrap:
-                                if not think_open:
-                                    yield "<think>\n"
-                                    think_open = True
-                                yield f"[Task: {desc}]\n"
-                            else:
-                                escaped = html.escape(desc)
-                                yield f'\n<details>\n<summary>Task: {escaped}</summary>\n\n</details>\n'
-                        continue
+                # --- Intermediate events: wrap in <think> ---
 
-                    if event_type == "response.task_progress":
-                        desc = event.get("description", "")
-                        tool = event.get("last_tool_name", "")
-                        if wrap:
-                            if not think_open:
-                                yield "<think>\n"
-                                think_open = True
-                            text = f"[Progress: {desc}"
-                            if tool:
-                                text += f" ({tool})"
-                            yield text + "]\n"
-                        else:
-                            text = html.escape(desc)
-                            if tool:
-                                text += f" ({html.escape(tool)})"
-                            yield f'\n<details>\n<summary>Progress: {text}</summary>\n\n</details>\n'
-                        continue
-
-                    if event_type == "response.task_notification":
-                        status = event.get("status", "")
-                        summary = event.get("summary", "")
-                        if summary:
-                            if wrap:
-                                if not think_open:
-                                    yield "<think>\n"
-                                    think_open = True
-                                yield f"[Task {status}: {summary}]\n"
-                            else:
-                                escaped = html.escape(summary)
-                                yield f'\n<details>\n<summary>Task {html.escape(status)}: {escaped}</summary>\n\n</details>\n'
-                        continue
-
-                    if event_type == "response.completed":
-                        completed = True
-                        response_obj = event.get("response", {})
-                        new_id = response_obj.get("id", "")
-                        if new_id and chat_id:
-                            self.chat_state[chat_id] = {
-                                "previous_response_id": new_id,
-                                "instructions_hash": instructions_hash,
-                                "model": self.valves.MODEL,
-                            }
-                        # Flush so the renderer finalizes the last HTML block
-                        yield "\n"
-                        continue
-
-                    if event_type in ("response.failed", "error"):
-                        error = event.get("response", {}).get("error", {})
-                        if not error:
-                            error = {
-                                "code": event.get("code", "unknown"),
-                                "message": event.get("message", "Unknown error"),
-                            }
-                        error_msg = error.get("message", "Unknown error")
-                        error_code = error.get("code", "")
-                        if error_code in ("sdk_error", "empty_response", "server_error"):
-                            raise Exception(f"Response failed: {error_msg}")
-                        raise ChainResetError(f"Response failed: {error_code} - {error_msg}")
-
-                # Flush sentinel filter buffer and post-sentinel buffer
-                if wrap:
-                    remaining = sentinel_filter.flush()
-                    if remaining:
-                        if sentinel_filter.triggered:
-                            post_sentinel_buf.append(remaining)
-                        else:
-                            yield remaining
-                    if sentinel_filter.triggered and post_sentinel_buf:
-                        # Commit: close think and emit buffered response text
-                        yield "\n</think>\n"
+                # Tool activity after sentinel → re-absorb buffered text
+                # into think so everything stays in one collapsible.
+                if (
+                    wrap
+                    and sentinel_filter.triggered
+                    and event_type in ("response.tool_use", "response.tool_result")
+                ):
+                    if post_sentinel_buf:
                         yield "".join(post_sentinel_buf)
                         post_sentinel_buf.clear()
-                    elif sentinel_filter.triggered:
-                        yield "\n</think>\n"
-                    elif think_open:
-                        # Think opened but sentinel never fired — close it
-                        yield "\n</think>\n"
+                        post_sentinel_len = 0
+                    sentinel_filter.reset()
+                    # think_open stays True, we're back inside the block
 
-                if not completed:
-                    log.warning("[THINK-PIPE] No response.completed event received!")
-                    yield "\n\n[Warning: Response may be incomplete]"
+                if event_type == "response.tool_use":
+                    tool_id = event.get("tool_use_id", "")
+                    name = event.get("name", "")
+                    if tool_id:
+                        tool_names[tool_id] = name
+                    if wrap:
+                        if not think_open:
+                            yield "<think>\n"
+                            think_open = True
+                        yield f"[Tool: {name}]\n"
+                    continue
+
+                if event_type == "response.tool_result":
+                    tool_id = event.get("tool_use_id", "")
+                    tool_name = tool_names.get(tool_id, "")
+                    is_error = event.get("is_error", False)
+                    content = event.get("content", "")
+                    if wrap:
+                        if not think_open:
+                            yield "<think>\n"
+                            think_open = True
+                        prefix = "Error" if is_error else "Result"
+                        label = f"{prefix}({tool_name})" if tool_name else prefix
+                        yield f"[{label}: {str(content)[:200]}]\n"
+                    else:
+                        prefix = "❌" if is_error else "📎"
+                        if tool_name:
+                            escaped = html.escape(tool_name)
+                            label = f"{prefix} {escaped} — {'Error' if is_error else 'Result'}"
+                        else:
+                            label = f"{prefix} {'Error' if is_error else 'Result'}"
+                        result_text = str(content)[:500]
+                        yield f'\n<details>\n<summary>{label}</summary>\n\n````\n{result_text}\n````\n\n</details>\n'
+                    continue
+
+                if event_type == "response.task_started":
+                    desc = event.get("description", "")
+                    if desc:
+                        if wrap:
+                            if not think_open:
+                                yield "<think>\n"
+                                think_open = True
+                            yield f"[Task: {desc}]\n"
+                        else:
+                            escaped = html.escape(desc)
+                            yield f'\n<details>\n<summary>Task: {escaped}</summary>\n\n</details>\n'
+                    continue
+
+                if event_type == "response.task_progress":
+                    desc = event.get("description", "")
+                    tool = event.get("last_tool_name", "")
+                    if wrap:
+                        if not think_open:
+                            yield "<think>\n"
+                            think_open = True
+                        text = f"[Progress: {desc}"
+                        if tool:
+                            text += f" ({tool})"
+                        yield text + "]\n"
+                    else:
+                        text = html.escape(desc)
+                        if tool:
+                            text += f" ({html.escape(tool)})"
+                        yield f'\n<details>\n<summary>Progress: {text}</summary>\n\n</details>\n'
+                    continue
+
+                if event_type == "response.task_notification":
+                    status = event.get("status", "")
+                    summary = event.get("summary", "")
+                    if summary:
+                        if wrap:
+                            if not think_open:
+                                yield "<think>\n"
+                                think_open = True
+                            yield f"[Task {status}: {summary}]\n"
+                        else:
+                            escaped = html.escape(summary)
+                            yield f'\n<details>\n<summary>Task {html.escape(status)}: {escaped}</summary>\n\n</details>\n'
+                    continue
+
+                if event_type == "response.completed":
+                    completed = True
+                    response_obj = event.get("response", {})
+                    new_id = response_obj.get("id", "")
+                    if new_id and chat_id:
+                        self.chat_state[chat_id] = {
+                            "previous_response_id": new_id,
+                            "instructions_hash": instructions_hash,
+                            "model": self.valves.MODEL,
+                        }
+                    # Flush so the renderer finalizes the last HTML block
+                    yield "\n"
+                    continue
+
+                if event_type in ("response.failed", "error"):
+                    error = event.get("response", {}).get("error", {})
+                    if not error:
+                        error = {
+                            "code": event.get("code", "unknown"),
+                            "message": event.get("message", "Unknown error"),
+                        }
+                    error_msg = error.get("message", "Unknown error")
+                    error_code = error.get("code", "")
+                    if error_code in ("sdk_error", "empty_response", "server_error"):
+                        raise Exception(f"Response failed: {error_msg}")
+                    raise ChainResetError(f"Response failed: {error_code} - {error_msg}")
+
+            # Flush sentinel filter buffer and post-sentinel buffer
+            if wrap:
+                remaining = sentinel_filter.flush()
+                if remaining:
+                    if sentinel_filter.triggered:
+                        post_sentinel_buf.append(remaining)
+                    else:
+                        yield remaining
+                if sentinel_filter.triggered and post_sentinel_buf:
+                    # Commit: close think and emit buffered response text
+                    yield "\n</think>\n"
+                    yield "".join(post_sentinel_buf)
+                    post_sentinel_buf.clear()
+                elif sentinel_filter.triggered:
+                    yield "\n</think>\n"
+                elif think_open:
+                    # Think opened but sentinel never fired — close it
+                    yield "\n</think>\n"
+
+            if not completed:
+                log.warning("[THINK-PIPE] No response.completed event received!")
+                yield "\n\n[Warning: Response may be incomplete]"
+
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     # ------------------------------------------------------------------
     # Non-streaming
@@ -582,7 +638,12 @@ class Pipe:
             headers["Authorization"] = f"Bearer {self.valves.API_KEY}"
         extra = getattr(self._local, "extra_headers", None)
         if extra:
-            headers.update(extra)
+            for k, v in extra.items():
+                try:
+                    v.encode("ascii")
+                    headers[k] = v
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    headers[k] = quote(v, safe="")
         return headers
 
     def _responses_url(self) -> str:
