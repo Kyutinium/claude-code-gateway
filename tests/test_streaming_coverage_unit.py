@@ -35,14 +35,14 @@ from src.streaming_utils import (
 
 def _parse_chat_sse(line: str) -> dict:
     assert line.startswith("data: ")
-    return json.loads(line[len("data: "):])
+    return json.loads(line[len("data: ") :])
 
 
 def _parse_response_sse(line: str) -> tuple[str, dict]:
     event_line, data_line = line.strip().splitlines()
     assert event_line.startswith("event: ")
     assert data_line.startswith("data: ")
-    return event_line[len("event: "):], json.loads(data_line[len("data: "):])
+    return event_line[len("event: ") :], json.loads(data_line[len("data: ") :])
 
 
 # ---------------------------------------------------------------------------
@@ -121,12 +121,14 @@ class TestExtractToolBlocksSDKObjects:
 class TestStripCollabJsonEscapeSequences:
     def test_escape_in_json_string_values(self):
         """Lines 120, 122: backslash escapes inside JSON string values."""
-        collab = json.dumps({
-            "collab_tool_call": {
-                "type": "spawn_agent",
-                "prompt": 'path is C:\\Users\\test and "quoted"',
+        collab = json.dumps(
+            {
+                "collab_tool_call": {
+                    "type": "spawn_agent",
+                    "prompt": 'path is C:\\Users\\test and "quoted"',
+                }
             }
-        })
+        )
         text = f"Before {collab} After"
         result = strip_collab_json(text)
         assert "collab_tool_call" not in result
@@ -135,12 +137,14 @@ class TestStripCollabJsonEscapeSequences:
 
     def test_escaped_quotes_in_json(self):
         """Lines 120, 122: escaped double quotes don't break brace matching."""
-        collab = json.dumps({
-            "collab_tool_call": {
-                "type": "wait",
-                "message": 'He said \\"hello\\" to {everyone}',
+        collab = json.dumps(
+            {
+                "collab_tool_call": {
+                    "type": "wait",
+                    "message": 'He said \\"hello\\" to {everyone}',
+                }
             }
-        })
+        )
         text = f"Start{collab}End"
         result = strip_collab_json(text)
         assert "collab_tool_call" not in result
@@ -178,12 +182,14 @@ class TestStripCollabJsonDecodeError:
 class TestCollabStreamFilterEscapeSequences:
     def test_escape_sequences_in_streaming(self):
         """Lines 183-186: backslash escapes in buffered JSON strings."""
-        collab = json.dumps({
-            "collab_tool_call": {
-                "type": "spawn_agent",
-                "prompt": 'path\\with\\backslashes and "quotes"',
+        collab = json.dumps(
+            {
+                "collab_tool_call": {
+                    "type": "spawn_agent",
+                    "prompt": 'path\\with\\backslashes and "quotes"',
+                }
             }
-        })
+        )
         f = CollabJsonStreamFilter()
         output_parts = []
         for ch in f"Hello {collab} World":
@@ -351,11 +357,7 @@ class TestExtractEmbeddedToolBlocksNonList:
         chunk = {
             "type": "assistant",
             "content": None,
-            "message": {
-                "content": [
-                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}
-                ]
-            },
+            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
         }
         blocks = extract_embedded_tool_blocks(chunk)
         assert len(blocks) == 1
@@ -440,14 +442,16 @@ class TestToolUseAccumulatorContentBlockStart:
     def test_non_tool_use_content_block_start_not_handled(self):
         """Line 552: content_block_start with non-tool_use type returns (False, None)."""
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_start",
-                "index": 0,
-                "content_block": {"type": "text"},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text"},
+                },
+            }
+        )
         assert handled is False
         assert result is None
 
@@ -462,27 +466,31 @@ class TestToolUseAccumulatorSubAgentTextDelta:
         """Line 564: content_block_delta with parent_id but not input_json_delta."""
         acc = ToolUseAccumulator()
         # text_delta from sub-agent (has parent_tool_use_id, not input_json_delta)
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "parent_tool_use_id": "parent-1",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "sub-agent noise"},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "parent_tool_use_id": "parent-1",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "sub-agent noise"},
+                },
+            }
+        )
         assert handled is True
         assert result is None
 
     def test_non_input_json_delta_without_parent_id(self):
         """Line 564: content_block_delta without parent_id and not input_json_delta."""
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {
-                "type": "content_block_delta",
-                "delta": {"type": "text_delta", "text": "normal text"},
-            },
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "normal text"},
+                },
+            }
+        )
         assert handled is False
         assert result is None
 
@@ -496,31 +504,37 @@ class TestToolUseAccumulatorSubAgentContentBlockStop:
     def test_content_block_stop_with_parent_id_no_accumulator(self):
         """Lines 585-586: content_block_stop with parent_id but no accumulated block."""
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "parent_tool_use_id": "parent-1",
-            "event": {"type": "content_block_stop", "index": 0},
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "parent_tool_use_id": "parent-1",
+                "event": {"type": "content_block_stop", "index": 0},
+            }
+        )
         assert handled is True
         assert result is None
 
     def test_content_block_stop_no_parent_no_accumulator(self):
         """Line 587: content_block_stop with no parent_id and no accumulated block."""
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {"type": "content_block_stop", "index": 99},
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {"type": "content_block_stop", "index": 99},
+            }
+        )
         assert handled is False
         assert result is None
 
     def test_unrecognized_event_type_returns_not_handled(self):
         """Line 589: unrecognized event type returns (False, None)."""
         acc = ToolUseAccumulator()
-        handled, result = acc.process_stream_event({
-            "type": "stream_event",
-            "event": {"type": "message_start"},
-        })
+        handled, result = acc.process_stream_event(
+            {
+                "type": "stream_event",
+                "event": {"type": "message_start"},
+            }
+        )
         assert handled is False
         assert result is None
 
@@ -533,30 +547,36 @@ class TestToolUseAccumulatorSubAgentContentBlockStop:
 class TestExtractUserToolResultsEmptyContent:
     def test_empty_list_content(self):
         """Line 611: empty content list returns ([], parent_id)."""
-        results, parent_id = extract_user_tool_results({
-            "type": "user",
-            "content": [],
-            "parent_tool_use_id": "p1",
-        })
+        results, parent_id = extract_user_tool_results(
+            {
+                "type": "user",
+                "content": [],
+                "parent_tool_use_id": "p1",
+            }
+        )
         assert results == []
         assert parent_id == "p1"
 
     def test_none_content_no_message(self):
         """Line 611: non-list content and no message fallback."""
-        results, parent_id = extract_user_tool_results({
-            "type": "user",
-            "content": 42,
-        })
+        results, parent_id = extract_user_tool_results(
+            {
+                "type": "user",
+                "content": 42,
+            }
+        )
         assert results == []
         assert parent_id is None
 
     def test_non_list_content_message_fallback_empty(self):
         """Line 611: non-list content with message that has empty content."""
-        results, parent_id = extract_user_tool_results({
-            "type": "user",
-            "content": "string",
-            "message": {"content": []},
-        })
+        results, parent_id = extract_user_tool_results(
+            {
+                "type": "user",
+                "content": "string",
+                "message": {"content": []},
+            }
+        )
         assert results == []
 
 
@@ -644,7 +664,7 @@ class TestStreamChunksParentToolUseId:
         system_events = []
         for line in lines:
             if line.startswith("data: ") and "system_event" in line:
-                parsed = json.loads(line[len("data: "):])
+                parsed = json.loads(line[len("data: ") :])
                 system_events.append(parsed["system_event"])
 
         assert len(system_events) == 1
@@ -773,7 +793,7 @@ class TestStreamResponseChunksIncompleteToolWarning:
         logger = logging.getLogger("test-incomplete-tool-resp")
 
         with caplog.at_level(logging.WARNING):
-            lines = [
+            [  # noqa: F841
                 line
                 async for line in stream_response_chunks(
                     chunk_source=source(),
@@ -999,7 +1019,7 @@ class TestStreamChunksSystemUnmatched:
         # No system_event for unmatched subtype
         for line in lines:
             if line.startswith("data: "):
-                parsed = json.loads(line[len("data: "):])
+                parsed = json.loads(line[len("data: ") :])
                 if "system_event" in parsed:
                     assert parsed["system_event"]["type"] != "not_a_real_subtype"
 

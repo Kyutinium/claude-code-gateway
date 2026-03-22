@@ -124,9 +124,7 @@ class TestAdminSystemPromptEndpoints:
         )
 
     async def _login(self, client):
-        resp = await client.post(
-            "/admin/api/login", json={"api_key": "test-key"}
-        )
+        resp = await client.post("/admin/api/login", json={"api_key": "test-key"})
         assert resp.status_code == 200
         return resp
 

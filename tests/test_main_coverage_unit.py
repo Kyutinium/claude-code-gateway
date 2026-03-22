@@ -101,13 +101,20 @@ def client_context(**extra_patches):
         "async_shutdown": patch.object(main.session_manager, "async_shutdown", new=AsyncMock()),
     }
 
-    with patches["discover_backends"], \
-         patches["verify_api_key_chat"], patches["verify_api_key_messages"], \
-         patches["verify_api_key_responses"], patches["verify_api_key_general"], \
-         patches["validate_claude_code_auth"], patches["_validate_backend_auth"], \
-         patches["_validate_backend_auth_chat"], patches["_validate_backend_auth_responses"], \
-         patches["_validate_backend_auth_messages"], \
-         patches["start_cleanup_task"], patches["async_shutdown"]:
+    with (
+        patches["discover_backends"],
+        patches["verify_api_key_chat"],
+        patches["verify_api_key_messages"],
+        patches["verify_api_key_responses"],
+        patches["verify_api_key_general"],
+        patches["validate_claude_code_auth"],
+        patches["_validate_backend_auth"],
+        patches["_validate_backend_auth_chat"],
+        patches["_validate_backend_auth_responses"],
+        patches["_validate_backend_auth_messages"],
+        patches["start_cleanup_task"],
+        patches["async_shutdown"],
+    ):
         with TestClient(main.app) as client:
             yield client, mock_cli
 
@@ -116,21 +123,21 @@ def client_context(**extra_patches):
 
 
 def _make_resolved(backend="claude", model=DEFAULT_MODEL):
-    return ResolvedModel(
-        public_model=model, backend=backend, provider_model=model
-    )
+    return ResolvedModel(public_model=model, backend=backend, provider_model=model)
 
 
 def _make_mock_backend(response_text="Hello", sdk_usage=None):
     """Create a mock backend that yields standard chunks."""
     chunks = []
     if sdk_usage:
-        chunks.append({
-            "type": "result",
-            "subtype": "success",
-            "result": response_text,
-            "usage": sdk_usage,
-        })
+        chunks.append(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": response_text,
+                "usage": sdk_usage,
+            }
+        )
     else:
         chunks.append({"content": [{"type": "text", "text": response_text}]})
         chunks.append({"subtype": "success", "result": response_text})
@@ -316,9 +323,12 @@ class TestIsAssistantContentChunkWrapper:
 
     def test_wrapper_returns_true_for_assistant(self):
         """Line 518: wrapper delegates correctly."""
-        assert main._is_assistant_content_chunk(
-            {"type": "assistant", "content": [{"type": "text", "text": "hi"}]}
-        ) is True
+        assert (
+            main._is_assistant_content_chunk(
+                {"type": "assistant", "content": [{"type": "text", "text": "hi"}]}
+            )
+            is True
+        )
 
     def test_wrapper_returns_false_for_metadata(self):
         assert main._is_assistant_content_chunk({"type": "metadata"}) is False
@@ -349,9 +359,7 @@ class TestStreamingSessionPreflightErrors:
         options = {"model": DEFAULT_MODEL}
 
         with pytest.raises(HTTPException) as exc_info:
-            await main._streaming_session_preflight(
-                request, resolved, mock_backend, options
-            )
+            await main._streaming_session_preflight(request, resolved, mock_backend, options)
 
         assert exc_info.value.status_code == 400
         assert "Cannot mix backends" in exc_info.value.detail
@@ -376,9 +384,7 @@ class TestStreamingSessionPreflightErrors:
         options = {"model": "codex"}
 
         with pytest.raises(HTTPException) as exc_info:
-            await main._streaming_session_preflight(
-                request, resolved, mock_backend, options
-            )
+            await main._streaming_session_preflight(request, resolved, mock_backend, options)
 
         assert exc_info.value.status_code == 409
         assert "Cannot resume Codex session" in exc_info.value.detail
@@ -489,7 +495,8 @@ class TestStreamingResponsePreflightFastPath:
             ),
         ):
             lines = [
-                line async for line in main.generate_streaming_response(
+                line
+                async for line in main.generate_streaming_response(
                     request, "req-preflight", preflight=preflight
                 )
             ]
@@ -566,7 +573,7 @@ class TestStreamingUsageFromSdkChunks:
             ]
 
         # The final data chunk (before [DONE]) should have usage from SDK
-        final_data = json.loads(lines[-2][len("data: "):])
+        final_data = json.loads(lines[-2][len("data: ") :])
         assert final_data["usage"]["prompt_tokens"] == 100
         assert final_data["usage"]["completion_tokens"] == 50
 
@@ -635,7 +642,8 @@ class TestStreamingErrorCapturesProviderSessionId:
             ),
         ):
             lines = [
-                line async for line in main.generate_streaming_response(
+                line
+                async for line in main.generate_streaming_response(
                     request, "req-error-capture", preflight=preflight
                 )
             ]
@@ -658,6 +666,7 @@ class TestCompatibilityReportDebugLogging:
 
     def test_compatibility_report_logged_in_debug(self, caplog):
         """Lines 861-863: When logger.isEnabledFor(DEBUG), report is generated."""
+
         async def fake_run(**kwargs):
             yield {"content": [{"type": "text", "text": "Hi"}]}
             yield {"subtype": "success", "result": "Hi"}
@@ -760,9 +769,10 @@ class TestAnthropicMessagesExceptionHandling:
 
     def test_messages_generic_exception_returns_500(self):
         """Lines 1123-1125: Non-HTTP exception → 500."""
+
         async def failing_run(**kwargs):
             raise RuntimeError("claude exploded")
-            yield  # noqa: unreachable (make it an async generator)
+            yield  # noqa: F841 -- unreachable yield makes this an async generator
 
         with client_context() as (client, mock_cli):
             mock_cli.run_completion = failing_run
@@ -983,8 +993,14 @@ class TestResponsesStreamingPreflightLockRelease:
 
         with pytest.raises(HTTPException) as exc_info:
             await main._responses_streaming_preflight(
-                body, resolved, mock_backend,
-                session, session_id, False, "Hi", None,
+                body,
+                resolved,
+                mock_backend,
+                session,
+                session_id,
+                False,
+                "Hi",
+                None,
             )
 
         assert exc_info.value.status_code == 409
@@ -1009,8 +1025,14 @@ class TestResponsesStreamingPreflightLockRelease:
 
         with pytest.raises(HTTPException) as exc_info:
             await main._responses_streaming_preflight(
-                body, resolved, mock_backend,
-                session, session_id, False, "Hi", None,
+                body,
+                resolved,
+                mock_backend,
+                session,
+                session_id,
+                False,
+                "Hi",
+                None,
             )
 
         assert exc_info.value.status_code == 404
@@ -1035,8 +1057,14 @@ class TestResponsesStreamingPreflightLockRelease:
 
         with pytest.raises(HTTPException) as exc_info:
             await main._responses_streaming_preflight(
-                body, resolved, mock_backend,
-                session, session_id, False, "Hi", None,
+                body,
+                resolved,
+                mock_backend,
+                session,
+                session_id,
+                False,
+                "Hi",
+                None,
             )
 
         assert exc_info.value.status_code == 400
@@ -1062,8 +1090,14 @@ class TestResponsesStreamingPreflightLockRelease:
 
         with pytest.raises(HTTPException) as exc_info:
             await main._responses_streaming_preflight(
-                body, resolved, mock_backend,
-                session, session_id, False, "Hi", None,
+                body,
+                resolved,
+                mock_backend,
+                session,
+                session_id,
+                False,
+                "Hi",
+                None,
             )
 
         assert exc_info.value.status_code == 409
@@ -1221,6 +1255,7 @@ class TestAnthropicMessagesNoResponse:
 
     def test_no_response_from_claude_returns_500(self):
         """Line 1092: parse_message returns None → 500."""
+
         async def empty_run(**kwargs):
             yield {"type": "metadata"}
 
@@ -1263,9 +1298,7 @@ class TestStreamingSessionPreflightSuccessPath:
         mock_backend = MagicMock()
         options = {"model": DEFAULT_MODEL, "permission_mode": "bypassPermissions"}
 
-        result = await main._streaming_session_preflight(
-            request, resolved, mock_backend, options
-        )
+        result = await main._streaming_session_preflight(request, resolved, mock_backend, options)
 
         assert result["session"] is session
         assert result["lock_acquired"] is True
@@ -1294,9 +1327,7 @@ class TestStreamingSessionPreflightSuccessPath:
         mock_backend = MagicMock()
         options = {"model": DEFAULT_MODEL}
 
-        result = await main._streaming_session_preflight(
-            request, resolved, mock_backend, options
-        )
+        result = await main._streaming_session_preflight(request, resolved, mock_backend, options)
 
         assert result["resume_id"] == "sdk-sess-123"
         assert result["is_new"] is False
@@ -1314,6 +1345,7 @@ class TestStreamingResponseLegacySessionPath:
 
     async def test_legacy_session_new_session(self):
         """Lines 721-757: Direct session path without preflight for new session."""
+
         async def fake_run(**kwargs):
             yield {"content": [{"type": "text", "text": "response"}]}
             yield {"subtype": "success", "result": "response"}
@@ -1357,11 +1389,7 @@ class TestStreamingResponseLegacySessionPath:
             ),
         ):
             # Call WITHOUT preflight to exercise legacy path
-            lines = [
-                line async for line in main.generate_streaming_response(
-                    request, "req-legacy"
-                )
-            ]
+            lines = [line async for line in main.generate_streaming_response(request, "req-legacy")]
 
         assert any("response" in line for line in lines)
         assert lines[-1] == "data: [DONE]\n\n"
@@ -1416,10 +1444,8 @@ class TestStreamingResponseHttpExceptionReraise:
             ),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                lines = [
-                    line async for line in main.generate_streaming_response(
-                        request, "req-http-exc"
-                    )
+                [  # noqa: F841
+                    line async for line in main.generate_streaming_response(request, "req-http-exc")
                 ]
 
             assert exc_info.value.status_code == 400
@@ -1435,6 +1461,7 @@ class TestChatCompletionsStreamingWithSession:
 
     def test_streaming_with_session_id_via_endpoint(self):
         """Lines 871-876: Stream mode with session_id triggers preflight."""
+
         async def fake_run(**kwargs):
             yield {"content": [{"type": "text", "text": "Hello"}]}
             yield {"subtype": "success", "result": "Hello"}
@@ -1469,6 +1496,7 @@ class TestChatCompletionsNonStreamingWithSession:
 
     def test_non_streaming_new_session(self):
         """Lines 893-957: New session in non-streaming mode."""
+
         async def fake_run(**kwargs):
             yield {"content": [{"type": "text", "text": "Hello"}]}
             yield {"subtype": "success", "result": "Hello"}
@@ -1539,9 +1567,10 @@ class TestChatCompletionsGenericException:
 
     def test_generic_exception_returns_500(self):
         """Lines 1014-1016: RuntimeError → 500."""
+
         async def failing_run(**kwargs):
             raise RuntimeError("unexpected failure")
-            yield  # noqa: unreachable
+            yield  # noqa: F841 -- unreachable yield makes this an async generator
 
         with client_context() as (client, mock_cli):
             mock_cli.run_completion = failing_run
@@ -1575,7 +1604,8 @@ class TestDebugEndpointTopLevelException:
 
         with client_context() as (client, _mock_cli):
             with patch.object(
-                general_module, "ChatCompletionRequest",
+                general_module,
+                "ChatCompletionRequest",
                 side_effect=Exception("model import error"),
             ):
                 response = client.post(
@@ -1601,6 +1631,7 @@ class TestResponsesStreamingExceptionPartialCapture:
 
     def test_streaming_responses_captures_session_id_on_failure(self):
         """Line 1591: chunks_buffer has content when exception occurs."""
+
         async def failing_run(**kwargs):
             yield {"type": "codex_session", "session_id": "thread-partial"}
             raise RuntimeError("mid-stream failure")
@@ -1694,9 +1725,7 @@ class TestValidationHandlerBodyReadException:
 
         loop = asyncio.new_event_loop()
         try:
-            result = loop.run_until_complete(
-                main.validation_exception_handler(mock_request, exc)
-            )
+            result = loop.run_until_complete(main.validation_exception_handler(mock_request, exc))
         finally:
             loop.close()
 
@@ -1758,10 +1787,9 @@ class TestLegacyStreamingCodexResumeGuard:
             ),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                lines = [
-                    line async for line in main.generate_streaming_response(
-                        request, "req-legacy-codex"
-                    )
+                [  # noqa: F841
+                    line
+                    async for line in main.generate_streaming_response(request, "req-legacy-codex")
                 ]
 
             assert exc_info.value.status_code == 409
@@ -1817,9 +1845,8 @@ class TestLegacyStreamingCodexResumeGuard:
             ),
         ):
             lines = [
-                line async for line in main.generate_streaming_response(
-                    request, "req-legacy-resume"
-                )
+                line
+                async for line in main.generate_streaming_response(request, "req-legacy-resume")
             ]
 
         assert any("response" in line for line in lines)
@@ -1871,9 +1898,7 @@ class TestNonStreamingBackendMismatch:
 class TestNonStreamingCodexResumeGuard:
     """Cover the Codex resume guard in non-streaming session mode."""
 
-    def test_non_streaming_codex_resume_no_thread_id_returns_409(
-        self, fake_codex_backend
-    ):
+    def test_non_streaming_codex_resume_no_thread_id_returns_409(self, fake_codex_backend):
         """Lines 914-924: Existing Codex session without provider_session_id."""
         session = session_manager.get_or_create_session("test-non-stream-codex-resume")
         session.add_messages([Message(role="user", content="turn 1")])
@@ -1907,6 +1932,7 @@ class TestResponsesStreamingExceptionWithChunksBuffer:
 
     def test_exception_after_codex_session_chunk(self):
         """Line 1591: chunks_buffer has codex_session chunk when exception fires."""
+
         # This test needs the exception to happen inside _run_stream after
         # chunks_buffer has been populated. We need stream_response_chunks
         # to yield some chunks before failing.
@@ -1983,6 +2009,7 @@ class TestResponsesStreamingExceptionCaptureWithBuffer:
 
     def test_capture_raises_after_successful_stream(self):
         """Line 1591: _capture_provider_session_id at line 1571 raises, outer except fires."""
+
         async def successful_run(**kwargs):
             yield {"type": "codex_session", "session_id": "thread-1591"}
             yield {"content": [{"type": "text", "text": "ok"}]}
@@ -2052,8 +2079,6 @@ class TestResponsesNonStreamingInsideLockFutureTurn:
 
         # Monkey-patch session.lock to decrement turn_counter AFTER acquire
         # simulating a TOCTOU race where another request decremented it
-        original_lock_class = session.lock.__class__
-
         class SimulateRaceLock:
             """Async context manager that changes turn_counter on entry."""
 

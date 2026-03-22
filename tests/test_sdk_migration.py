@@ -17,7 +17,11 @@ class TestSystemPromptFormats:
         """Test preset-based system prompt with append field."""
         options = ClaudeAgentOptions(
             max_turns=1,
-            system_prompt={"type": "preset", "preset": "claude_code", "append": "You are a helpful assistant."},
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": "You are a helpful assistant.",
+            },
         )
         assert options.system_prompt is not None
         assert isinstance(options.system_prompt, dict)
@@ -158,7 +162,11 @@ class TestClaudeAgentOptionsAllParameters:
             cwd="/tmp",
             resume="session-abc-123",
         )
-        assert options.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be concise."}
+        assert options.system_prompt == {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "Be concise.",
+        }
         assert options.model == "sonnet"
         assert options.max_turns == 10
         assert options.allowed_tools == ["Read", "Write", "Bash"]

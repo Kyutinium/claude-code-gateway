@@ -161,9 +161,7 @@ class RuntimeConfig:
                     return True
                 if low in ("false", "0", "no", "off"):
                     return False
-                raise ValueError(
-                    f"{key} must be a boolean (true/false/yes/no/1/0), got {value!r}"
-                )
+                raise ValueError(f"{key} must be a boolean (true/false/yes/no/1/0), got {value!r}")
             if isinstance(value, (int, float)):
                 return bool(value)
             raise ValueError(f"{key} must be a boolean, got {type(value).__name__}")

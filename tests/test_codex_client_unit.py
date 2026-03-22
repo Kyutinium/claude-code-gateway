@@ -242,9 +242,7 @@ class TestItemUpdatedNonTodo:
 class TestCwdValidation:
     def test_nonexistent_cwd_raises(self, monkeypatch):
         """Passing a nonexistent cwd raises ValueError."""
-        monkeypatch.setattr(
-            "src.backends.codex.client.CODEX_CLI_PATH", "/usr/bin/true"
-        )
+        monkeypatch.setattr("src.backends.codex.client.CODEX_CLI_PATH", "/usr/bin/true")
         with pytest.raises(ValueError, match="does not exist"):
             CodexCLI(cwd="/nonexistent/path/that/does/not/exist")
 
@@ -258,9 +256,7 @@ class TestTempWorkspaceFallback:
     def test_no_cwd_creates_temp_dir(self, monkeypatch):
         """When no cwd is given, a temporary workspace is created."""
         fake_bin = "/usr/bin/true"
-        monkeypatch.setattr(
-            "src.backends.codex.client.CODEX_CLI_PATH", fake_bin
-        )
+        monkeypatch.setattr("src.backends.codex.client.CODEX_CLI_PATH", fake_bin)
         monkeypatch.setattr(
             "src.backends.codex.client.CodexCLI._find_codex_binary",
             staticmethod(lambda: fake_bin),
@@ -341,9 +337,7 @@ class TestBuildOptions:
         request = MagicMock()
         request.to_claude_options.return_value = {"model": "o3"}
         request.enable_tools = True
-        resolved = ResolvedModel(
-            public_model="codex/o3", backend="codex", provider_model="o3"
-        )
+        resolved = ResolvedModel(public_model="codex/o3", backend="codex", provider_model="o3")
         opts = codex_cli.build_options(request, resolved)
         assert opts["permission_mode"] == "bypassPermissions"
         assert opts["model"] == "o3"
@@ -357,12 +351,8 @@ class TestBuildOptions:
         request = MagicMock()
         request.to_claude_options.return_value = {"model": "o3"}
         request.enable_tools = True
-        resolved = ResolvedModel(
-            public_model="codex/o3", backend="codex", provider_model="o3"
-        )
-        opts = codex_cli.build_options(
-            request, resolved, overrides={"temperature": 0.5}
-        )
+        resolved = ResolvedModel(public_model="codex/o3", backend="codex", provider_model="o3")
+        opts = codex_cli.build_options(request, resolved, overrides={"temperature": 0.5})
         assert opts["temperature"] == 0.5
 
     def test_build_options_tools_disabled_raises(self, codex_cli, monkeypatch):
@@ -374,9 +364,7 @@ class TestBuildOptions:
         request = MagicMock()
         request.to_claude_options.return_value = {"model": "o3"}
         request.enable_tools = False
-        resolved = ResolvedModel(
-            public_model="codex/o3", backend="codex", provider_model="o3"
-        )
+        resolved = ResolvedModel(public_model="codex/o3", backend="codex", provider_model="o3")
         with pytest.raises(BackendConfigError, match="does not support disabling tools"):
             codex_cli.build_options(request, resolved)
 
@@ -413,9 +401,7 @@ class TestSpawnCodex:
             return proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=fake_create):
-            async with codex_cli._spawn_codex(
-                model="o3", system_prompt="You are helpful"
-            ) as proc:
+            async with codex_cli._spawn_codex(model="o3", system_prompt="You are helpful"):
                 pass
 
         cmd_str = " ".join(str(c) for c in captured_cmd)
@@ -438,7 +424,7 @@ class TestSpawnCodex:
             return proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=fake_create):
-            async with codex_cli._spawn_codex(thread_id="thread-abc-123") as proc:
+            async with codex_cli._spawn_codex(thread_id="thread-abc-123"):
                 pass
 
         cmd_str = " ".join(str(c) for c in captured_cmd)
@@ -462,7 +448,7 @@ class TestSpawnCodex:
             return proc
 
         with patch("asyncio.create_subprocess_exec", side_effect=fake_create):
-            async with codex_cli._spawn_codex() as p:
+            async with codex_cli._spawn_codex():
                 # Simulate early exit from context — process still running
                 pass
 

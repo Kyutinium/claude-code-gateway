@@ -210,12 +210,14 @@ class TestConfigureSandboxTriState:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox is not None
@@ -261,12 +263,14 @@ class TestConfigureSandboxParams:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox["autoAllowBashIfSandboxed"] is False
@@ -276,12 +280,14 @@ class TestConfigureSandboxParams:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", ["git", "docker"]), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", ["git", "docker"]),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox["excludedCommands"] == ["git", "docker"]
@@ -291,12 +297,14 @@ class TestConfigureSandboxParams:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox["allowUnsandboxedCommands"] is True
@@ -306,12 +314,14 @@ class TestConfigureSandboxParams:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox["network"]["allowLocalBinding"] is True
@@ -321,12 +331,14 @@ class TestConfigureSandboxParams:
         from claude_agent_sdk import ClaudeAgentOptions
 
         opts = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", True):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", True),
+        ):
             cli_instance._configure_sandbox(opts)
 
         assert opts.sandbox["enableWeakerNestedSandbox"] is True
@@ -337,12 +349,14 @@ class TestBuildSdkOptionsSandboxIntegration:
 
     def test_sandbox_included_when_enabled(self, cli_instance):
         """_build_sdk_options includes sandbox when CLAUDE_SANDBOX_ENABLED=True."""
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             opts = cli_instance._build_sdk_options()
 
         assert opts.sandbox is not None
@@ -375,12 +389,14 @@ class TestExcludedCommandsCopyPerRequest:
         opts1 = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
         opts2 = ClaudeAgentOptions(max_turns=1, cwd=cli_instance.cwd)
 
-        with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", source_list), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False), \
-             patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False):
+        with (
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", source_list),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False),
+            patch("src.backends.claude.client.CLAUDE_SANDBOX_WEAKER_NESTED", False),
+        ):
             cli_instance._configure_sandbox(opts1)
             cli_instance._configure_sandbox(opts2)
 

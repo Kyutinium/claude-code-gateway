@@ -464,7 +464,11 @@ class TestClaudeCodeCLIRunCompletion:
 
             assert len(captured_options) == 1
             opts = captured_options[0]
-            assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "You are helpful"}
+            assert opts.system_prompt == {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": "You are helpful",
+            }
 
     @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):
@@ -657,7 +661,11 @@ class TestBuildSdkOptions:
     def test_custom_system_prompt(self, cli_instance):
         """When system_prompt given, preset with append is used."""
         opts = cli_instance._build_sdk_options(system_prompt="Be concise")
-        assert opts.system_prompt == {"type": "preset", "preset": "claude_code", "append": "Be concise"}
+        assert opts.system_prompt == {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "Be concise",
+        }
 
     def test_thinking_mode_adaptive(self, cli_instance):
         """Adaptive thinking mode sets type=adaptive."""
@@ -817,6 +825,21 @@ class TestConvertMessageTypeMap:
         result = cli._convert_message(obj)
         assert result.get("type") == "system"
         assert result["subtype"] == "task_started"
+
+    def test_type_injected_for_rate_limit_event(self, cli_class):
+        """RateLimitEvent (SDK 0.1.49+) gets type='rate_limit'."""
+        from claude_agent_sdk.types import RateLimitEvent, RateLimitInfo
+
+        cli = _make_cli(cli_class)
+
+        info = RateLimitInfo(status="allowed_warning", utilization=0.8)
+        obj = RateLimitEvent(rate_limit_info=info, uuid="rl-1", session_id="s1")
+
+        result = cli._convert_message(obj)
+        assert result.get("type") == "rate_limit"
+        assert result["uuid"] == "rl-1"
+        # rate_limit_info should be the real dataclass, not a dict
+        assert hasattr(result["rate_limit_info"], "status")
 
 
 class TestConvertMessageEdgeCases:
@@ -1008,7 +1031,9 @@ class TestConfigureHelpers:
         with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True):
             with patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True):
                 with patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []):
-                    with patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False):
+                    with patch(
+                        "src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False
+                    ):
                         with patch(
                             "src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False
                         ):
@@ -1044,7 +1069,9 @@ class TestConfigureHelpers:
         with patch("src.backends.claude.client.CLAUDE_SANDBOX_ENABLED", True):
             with patch("src.backends.claude.client.CLAUDE_SANDBOX_AUTO_ALLOW_BASH", True):
                 with patch("src.backends.claude.client.CLAUDE_SANDBOX_EXCLUDED_COMMANDS", []):
-                    with patch("src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False):
+                    with patch(
+                        "src.backends.claude.client.CLAUDE_SANDBOX_ALLOW_UNSANDBOXED", False
+                    ):
                         with patch(
                             "src.backends.claude.client.CLAUDE_SANDBOX_NETWORK_ALLOW_LOCAL", False
                         ):

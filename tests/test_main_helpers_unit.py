@@ -416,7 +416,9 @@ async def test_stream_chunks_fallback_without_stream_events():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(message_source(), request, "req-fb", chunks, _test_logger):
+    async for line in main._stream_chunks(
+        message_source(), request, "req-fb", chunks, _test_logger
+    ):
         streamed.append(line)
 
     assert any("response" in line for line in streamed)
@@ -445,7 +447,9 @@ async def test_stream_chunks_skips_assistant_in_token_mode():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(mixed_source(), request, "req-skip", chunks, _test_logger):
+    async for line in main._stream_chunks(
+        mixed_source(), request, "req-skip", chunks, _test_logger
+    ):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -504,7 +508,9 @@ async def test_stream_chunks_thinking_with_tags():
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(thinking_source(), request, "req-think", chunks, _test_logger):
+    async for line in main._stream_chunks(
+        thinking_source(), request, "req-think", chunks, _test_logger
+    ):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]
@@ -554,7 +560,9 @@ async def test_stream_chunks_token_mode_skips_assistantmessage_tool_use_duplicat
 
     chunks = []
     streamed = []
-    async for line in main._stream_chunks(tool_use_source(), request, "req-tool", chunks, _test_logger):
+    async for line in main._stream_chunks(
+        tool_use_source(), request, "req-tool", chunks, _test_logger
+    ):
         streamed.append(line)
 
     payloads = [_parse_chat_sse(line) for line in streamed]

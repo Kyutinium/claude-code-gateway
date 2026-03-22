@@ -574,6 +574,51 @@ class TestExtractSdkUsage:
         assert result["prompt_tokens"] == 99
         assert result["completion_tokens"] == 88
 
+    def test_falls_back_to_assistant_usage(self):
+        """When no ResultMessage, sum per-turn AssistantMessage.usage (SDK 0.1.49+)."""
+        chunks = [
+            {"type": "assistant", "usage": {"input_tokens": 100, "output_tokens": 40}},
+            {"type": "assistant", "usage": {"input_tokens": 120, "output_tokens": 60}},
+        ]
+        result = extract_sdk_usage(chunks)
+        assert result == {"prompt_tokens": 220, "completion_tokens": 100, "total_tokens": 320}
+
+    def test_result_usage_preferred_over_assistant(self):
+        """ResultMessage.usage takes priority even when AssistantMessage.usage exists."""
+        chunks = [
+            {"type": "assistant", "usage": {"input_tokens": 50, "output_tokens": 20}},
+            {"type": "result", "usage": {"input_tokens": 200, "output_tokens": 80}},
+        ]
+        result = extract_sdk_usage(chunks)
+        assert result["prompt_tokens"] == 200
+        assert result["completion_tokens"] == 80
+
+    def test_assistant_usage_ignored_when_absent(self):
+        """AssistantMessage without usage field does not contribute to fallback."""
+        chunks = [
+            {"type": "assistant", "content": []},
+            {"type": "assistant", "usage": {"input_tokens": 50, "output_tokens": 30}},
+        ]
+        result = extract_sdk_usage(chunks)
+        assert result == {"prompt_tokens": 50, "completion_tokens": 30, "total_tokens": 80}
+
+    def test_assistant_usage_includes_cache_tokens(self):
+        """Assistant fallback includes cache_creation and cache_read tokens."""
+        chunks = [
+            {
+                "type": "assistant",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 40,
+                    "cache_creation_input_tokens": 50,
+                    "cache_read_input_tokens": 30,
+                },
+            },
+        ]
+        result = extract_sdk_usage(chunks)
+        assert result["prompt_tokens"] == 180  # 100 + 50 + 30
+        assert result["completion_tokens"] == 40
+
 
 @pytest.mark.asyncio
 async def test_stream_chunks_emits_assistant_error():
@@ -600,6 +645,118 @@ async def test_stream_chunks_emits_assistant_error():
     assert "[Error: rate_limit]" in all_content
     # Error chunk should be buffered
     assert any(c.get("error") == "rate_limit" for c in chunks_buffer)
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_skips_rate_limit_events():
+    """SDK rate_limit events (0.1.49+) with non-rejected status are silently skipped."""
+    from claude_agent_sdk.types import RateLimitInfo
+
+    info = RateLimitInfo(status="allowed_warning", utilization=0.85)
+
+    async def rate_limit_source():
+        yield {
+            "type": "rate_limit",
+            "rate_limit_info": info,
+            "uuid": "rl-1",
+            "session_id": "s1",
+        }
+        yield {
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "session_id": "s1",
+            "is_error": False,
+        }
+
+    request = ChatCompletionRequest(
+        model="claude-test",
+        messages=[Message(role="user", content="Hi")],
+        stream=True,
+    )
+    chunks_buffer = []
+    lines = [
+        line
+        async for line in stream_chunks(
+            rate_limit_source(), request, "req-rl", chunks_buffer, logging.getLogger("test-rl")
+        )
+    ]
+
+    all_content = "".join(lines)
+    # allowed_warning should NOT appear in streamed content
+    assert "allowed_warning" not in all_content
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_emits_error_on_rejected_rate_limit():
+    """SDK rate_limit with status=rejected emits an error to the client."""
+    from claude_agent_sdk.types import RateLimitInfo
+
+    info = RateLimitInfo(status="rejected")
+
+    async def rejected_source():
+        yield {
+            "type": "rate_limit",
+            "rate_limit_info": info,
+            "uuid": "rl-2",
+            "session_id": "s1",
+        }
+
+    request = ChatCompletionRequest(
+        model="claude-test",
+        messages=[Message(role="user", content="Hi")],
+        stream=True,
+    )
+    chunks_buffer = []
+    lines = [
+        line
+        async for line in stream_chunks(
+            rejected_source(), request, "req-rl-rej", chunks_buffer, logging.getLogger("test-rl")
+        )
+    ]
+
+    all_content = "".join(lines)
+    assert "rate_limit_rejected" in all_content
+
+
+@pytest.mark.asyncio
+async def test_stream_chunks_preserves_assistant_usage_in_token_mode():
+    """In token-streaming mode, assistant chunks with usage are buffered for extract_sdk_usage."""
+
+    async def source():
+        # Stream event enables token_streaming mode
+        yield {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Hi"},
+            },
+        }
+        # AssistantMessage with usage — should be buffered even though content is skipped
+        yield {
+            "type": "assistant",
+            "content": [{"type": "text", "text": "Hi"}],
+            "model": "claude-test",
+            "usage": {"input_tokens": 100, "output_tokens": 40},
+        }
+
+    request = ChatCompletionRequest(
+        model="claude-test",
+        messages=[Message(role="user", content="Hi")],
+        stream=True,
+    )
+    chunks_buffer = []
+    [
+        line
+        async for line in stream_chunks(
+            source(), request, "req-usage", chunks_buffer, logging.getLogger("test-usage")
+        )
+    ]
+
+    usage = extract_sdk_usage(chunks_buffer)
+    assert usage is not None
+    assert usage["prompt_tokens"] == 100
+    assert usage["completion_tokens"] == 40
 
 
 @pytest.mark.asyncio

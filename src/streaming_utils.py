@@ -28,10 +28,14 @@ _STOP_REASON_MAP = {
 
 
 def extract_sdk_usage(chunks: list) -> Optional[Dict[str, int]]:
-    """Extract real token usage from SDK ResultMessage if available.
+    """Extract real token usage from SDK messages if available.
+
+    Prefers ResultMessage.usage (final totals).  Falls back to summing
+    per-turn AssistantMessage.usage (available since SDK 0.1.49).
 
     Returns dict with prompt_tokens, completion_tokens, total_tokens or None.
     """
+    # Primary: ResultMessage usage (cumulative totals)
     for msg in reversed(chunks):
         if isinstance(msg, dict) and msg.get("type") == "result" and msg.get("usage"):
             usage = msg["usage"]
@@ -46,7 +50,43 @@ def extract_sdk_usage(chunks: list) -> Optional[Dict[str, int]]:
                 "completion_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
             }
+
+    # Fallback: sum per-turn usage from AssistantMessage (SDK 0.1.49+)
+    total_input = 0
+    total_output = 0
+    found_any = False
+    for msg in chunks:
+        if isinstance(msg, dict) and msg.get("type") == "assistant" and msg.get("usage"):
+            found_any = True
+            usage = msg["usage"]
+            total_input += (
+                usage.get("input_tokens", 0)
+                + usage.get("cache_creation_input_tokens", 0)
+                + usage.get("cache_read_input_tokens", 0)
+            )
+            total_output += usage.get("output_tokens", 0)
+    if found_any:
+        return {
+            "prompt_tokens": total_input,
+            "completion_tokens": total_output,
+            "total_tokens": total_input + total_output,
+        }
+
     return None
+
+
+def _extract_rate_limit_status(chunk: Dict[str, Any]) -> str:
+    """Extract the status string from a rate_limit chunk.
+
+    ``rate_limit_info`` may be a plain dict (in tests) or an SDK
+    ``RateLimitInfo`` dataclass (at runtime).  Handle both.
+    """
+    info = chunk.get("rate_limit_info")
+    if info is None:
+        return "unknown"
+    if isinstance(info, dict):
+        return info.get("status", "unknown")
+    return getattr(info, "status", "unknown")
 
 
 def map_stop_reason(stop_reason: Optional[str] = None) -> str:
@@ -677,6 +717,16 @@ async def stream_chunks(
             content_sent = True
             continue
 
+        # Handle SDK rate-limit events (new in SDK 0.1.49)
+        if chunk.get("type") == "rate_limit":
+            status = _extract_rate_limit_status(chunk)
+            logger.warning("SDK rate limit event: status=%s", status)
+            if status == "rejected":
+                for sse in _emit_sse("\n\n[Error: rate_limit_rejected]\n"):
+                    yield sse
+                content_sent = True
+            continue
+
         # Handle task system messages (subagent progress — structured JSON, not content)
         if chunk.get("type") == "system":
             task_event = _build_task_event(chunk)
@@ -711,6 +761,9 @@ async def stream_chunks(
             if chunk.get("type") == "stream_event":
                 continue
             if chunk.get("type") != "user" and is_assistant_content_chunk(chunk):
+                # Preserve assistant chunks that carry per-turn usage (SDK 0.1.49+)
+                if chunk.get("type") == "assistant" and chunk.get("usage"):
+                    chunks_buffer.append(chunk)
                 continue
 
         # User chunks with tool_result blocks
@@ -891,6 +944,16 @@ async def stream_response_chunks(
                 yield _make_failed_event(error_type, f"Claude error: {error_type}")
                 return
 
+            # Handle SDK rate-limit events (new in SDK 0.1.49)
+            if chunk.get("type") == "rate_limit":
+                status = _extract_rate_limit_status(chunk)
+                logger.warning("SDK rate limit event: status=%s", status)
+                if status == "rejected":
+                    stream_result["success"] = False
+                    yield _make_failed_event("rate_limit", "Rate limit rejected")
+                    return
+                continue
+
             # Handle task system messages (subagent progress — structured JSON, not content)
             if chunk.get("type") == "system":
                 task_event = _build_task_event(chunk)
@@ -930,6 +993,9 @@ async def stream_response_chunks(
                 if chunk.get("type") == "stream_event":
                     continue
                 if chunk.get("type") != "user" and is_assistant_content_chunk(chunk):
+                    # Preserve assistant chunks that carry per-turn usage (SDK 0.1.49+)
+                    if chunk.get("type") == "assistant" and chunk.get("usage"):
+                        chunks_buffer.append(chunk)
                     continue
 
             # User chunks with tool_result blocks

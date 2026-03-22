@@ -65,7 +65,6 @@ class TestRuntimeConfig:
         assert result["default_max_turns"]["value"] == 42
         assert result["default_max_turns"]["overridden"] is True
 
-
     def test_reset_unknown_key_raises(self):
         with pytest.raises(KeyError, match="not editable"):
             runtime_config.reset("unknown_key")

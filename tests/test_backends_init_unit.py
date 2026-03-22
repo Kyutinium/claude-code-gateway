@@ -41,11 +41,15 @@ class TestDiscoverBackends:
         fake_bin.write_text("#!/bin/sh\necho ok")
         fake_bin.chmod(0o755)
 
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth, patch.dict(
-            "os.environ", {"CODEX_CLI_PATH": str(fake_bin), "CLAUDE_CWD": str(tmp_path)}
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+            patch.dict(
+                "os.environ", {"CODEX_CLI_PATH": str(fake_bin), "CLAUDE_CWD": str(tmp_path)}
+            ),
         ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
@@ -58,11 +62,13 @@ class TestDiscoverBackends:
 
     def test_discover_backends_codex_import_failure(self):
         """When Codex register() raises, Claude still registers and no crash."""
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth, patch.dict(
-            "os.environ", {"CLAUDE_CWD": "/tmp"}
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+            patch.dict("os.environ", {"CLAUDE_CWD": "/tmp"}),
         ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
@@ -80,20 +86,25 @@ class TestDiscoverBackends:
 
     def test_discover_backends_codex_import_failure_logs_warning(self, caplog):
         """Codex failure is logged as a warning."""
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth, patch.dict(
-            "os.environ", {"CLAUDE_CWD": "/tmp"}
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+            patch.dict("os.environ", {"CLAUDE_CWD": "/tmp"}),
         ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
             from src.backends import discover_backends
 
-            with patch(
-                "src.backends.codex.register",
-                side_effect=RuntimeError("no codex binary"),
-            ), caplog.at_level("WARNING", logger="src.backends"):
+            with (
+                patch(
+                    "src.backends.codex.register",
+                    side_effect=RuntimeError("no codex binary"),
+                ),
+                caplog.at_level("WARNING", logger="src.backends"),
+            ):
                 discover_backends()
 
             assert any("Codex backend not available" in r.message for r in caplog.records)
@@ -113,11 +124,13 @@ class TestDiscoverBackends:
             def register(cls, name, client):
                 cls.clients[name] = client
 
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth, patch.dict(
-            "os.environ", {"CLAUDE_CWD": "/tmp"}
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+            patch.dict("os.environ", {"CLAUDE_CWD": "/tmp"}),
         ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
@@ -178,10 +191,13 @@ class TestClaudeRegister:
 
     def test_register_happy_path(self, tmp_path):
         """Successful registration creates client and descriptor."""
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth:
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+        ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
             from src.backends.claude import register
@@ -210,23 +226,27 @@ class TestClaudeRegister:
         """Client creation failure is logged as an error."""
         from src.backends.claude import register
 
-        with patch(
-            "src.backends.claude.client.ClaudeCodeCLI",
-            side_effect=RuntimeError("sdk init error"),
-        ), caplog.at_level("ERROR", logger="src.backends.claude"):
+        with (
+            patch(
+                "src.backends.claude.client.ClaudeCodeCLI",
+                side_effect=RuntimeError("sdk init error"),
+            ),
+            caplog.at_level("ERROR", logger="src.backends.claude"),
+        ):
             with pytest.raises(RuntimeError):
                 register(cwd="/tmp", timeout=1000)
 
-        assert any(
-            "Claude backend client creation failed" in r.message for r in caplog.records
-        )
+        assert any("Claude backend client creation failed" in r.message for r in caplog.records)
 
     def test_register_uses_default_registry_cls(self, tmp_path):
         """When registry_cls is None, defaults to BackendRegistry."""
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth:
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+        ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
             from src.backends.claude import register
@@ -237,11 +257,13 @@ class TestClaudeRegister:
 
     def test_register_uses_env_cwd_when_none(self, tmp_path):
         """When cwd is None, register() falls back to CLAUDE_CWD env var."""
-        with patch(
-            "src.auth.validate_claude_code_auth",
-            return_value=(True, {"method": "claude_cli"}),
-        ), patch("src.auth.auth_manager") as mock_auth, patch.dict(
-            "os.environ", {"CLAUDE_CWD": str(tmp_path)}
+        with (
+            patch(
+                "src.auth.validate_claude_code_auth",
+                return_value=(True, {"method": "claude_cli"}),
+            ),
+            patch("src.auth.auth_manager") as mock_auth,
+            patch.dict("os.environ", {"CLAUDE_CWD": str(tmp_path)}),
         ):
             mock_auth.get_claude_code_env_vars.return_value = {}
 
@@ -354,10 +376,13 @@ class TestCodexRegister:
         """Binary-missing failure is logged with both warning messages."""
         from src.backends.codex import register
 
-        with patch(
-            "src.backends.codex.client.CodexCLI",
-            side_effect=FileNotFoundError("binary not found"),
-        ), caplog.at_level("WARNING", logger="src.backends.codex"):
+        with (
+            patch(
+                "src.backends.codex.client.CodexCLI",
+                side_effect=FileNotFoundError("binary not found"),
+            ),
+            caplog.at_level("WARNING", logger="src.backends.codex"),
+        ):
             register(cwd="/tmp", timeout=1000)
 
         messages = [r.message for r in caplog.records]

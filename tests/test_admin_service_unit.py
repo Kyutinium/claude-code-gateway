@@ -365,10 +365,12 @@ class TestGetSessionMessages:
         sid = "test-admin-history-001"
         try:
             session = session_manager.get_or_create_session(sid)
-            session.add_messages([
-                Message(role="user", content="Hello"),
-                Message(role="assistant", content="Hi there!"),
-            ])
+            session.add_messages(
+                [
+                    Message(role="user", content="Hello"),
+                    Message(role="assistant", content="Hi there!"),
+                ]
+            )
 
             result = get_session_messages(sid)
             assert result is not None
@@ -418,6 +420,7 @@ class TestGetSessionMessages:
 
             # Small delay to detect TTL change
             import time
+
             time.sleep(0.01)
 
             get_session_messages(sid)
@@ -441,7 +444,9 @@ class TestGetSessionMessages:
                     role="user",
                     content=[
                         ContentPart(type="text", text="Look at this:"),
-                        ContentPart(type="image_url", image_url={"url": "data:image/png;base64,abc"}),
+                        ContentPart(
+                            type="image_url", image_url={"url": "data:image/png;base64,abc"}
+                        ),
                     ],
                 )
             )

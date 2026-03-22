@@ -20,6 +20,7 @@ from claude_agent_sdk.types import (
     ResultMessage,
     UserMessage,
     SystemMessage,
+    RateLimitEvent,
 )
 from claude_agent_sdk.types import (
     SandboxSettings,
@@ -312,7 +313,11 @@ class ClaudeCodeCLI:
             full = custom_base + ("\n\n" + system_prompt if system_prompt else "")
             options.system_prompt = full
         elif system_prompt:
-            options.system_prompt = {"type": "preset", "preset": "claude_code", "append": system_prompt}
+            options.system_prompt = {
+                "type": "preset",
+                "preset": "claude_code",
+                "append": system_prompt,
+            }
         else:
             options.system_prompt = {"type": "preset", "preset": "claude_code"}
         if permission_mode:
@@ -339,6 +344,7 @@ class ClaudeCodeCLI:
         (StreamEvent, "stream_event"),
         (AssistantMessage, "assistant"),
         (ResultMessage, "result"),
+        (RateLimitEvent, "rate_limit"),
         (UserMessage, "user"),
         (SystemMessage, "system"),  # Must be last: TaskStarted/Progress/Notification are subclasses
     ]

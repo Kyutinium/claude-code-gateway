@@ -70,7 +70,9 @@ class TestAuthGetApiKeyImportException:
             importlib.reload(src.auth)
 
             # Force ImportError when trying to import src.main inside get_api_key
-            original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+            original_import = (
+                __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+            )
 
             def failing_import(name, *args, **kwargs):
                 if name == "src" or name == "src.main":

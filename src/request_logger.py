@@ -61,6 +61,7 @@ def _bucket_for_path(path: str) -> Optional[str]:
 # Log entry dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class RequestLogEntry:
     """Single request log record."""
@@ -97,6 +98,7 @@ DEFAULT_EXCLUDE_PREFIXES: Tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 # RequestLogger
 # ---------------------------------------------------------------------------
+
 
 class RequestLogger:
     """Thread-safe bounded in-memory request log."""
