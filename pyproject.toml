@@ -1,8 +1,7 @@
 [project]
-name = "claude-code-openai-wrapper"
-version = "2.2.0"
+name = "claude-code-gateway"
+version = "0.1.0"
 description = "OpenAI API-compatible wrapper for Claude Code"
-authors = [{name = "Richard Atkinson", email = "richardatk01@gmail.com"}]
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
