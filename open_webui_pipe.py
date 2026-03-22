@@ -265,140 +265,182 @@ class Pipe:
     async def _stream_responses(
         self, chat_id: str, payload: dict, instructions_hash: str
     ) -> AsyncGenerator[str, None]:
-        """Streaming /v1/responses call. Yields text deltas."""
+        """Streaming /v1/responses call. Yields text deltas.
+
+        HTTP streaming is performed in a dedicated asyncio task so that
+        httpx / anyio cancel scopes stay task-local.  An asyncio.Queue
+        bridges the fetcher task and this async generator, preventing
+        "Attempted to exit cancel scope in a different task" errors when
+        Open WebUI consumes or closes the generator from another task.
+        """
         log.info(
             "[STREAM] Starting request to %s with payload keys: %s",
             self._responses_url(),
             list(payload.keys()),
         )
         log.info("[STREAM] previous_response_id=%s", payload.get("previous_response_id"))
-        # Use a generous read timeout — the gateway sends SSE keepalive
-        # comments every ~15s during idle periods (tool execution, context
-        # compaction), so a 60s read timeout catches truly dead connections
-        # while not killing active-but-quiet streams.
-        timeout = httpx.Timeout(
-            connect=30.0,
-            read=60.0,
-            write=30.0,
-            pool=float(self.valves.TIMEOUT),
-        )
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST", self._responses_url(), json=payload, headers=self._make_headers()
-            ) as resp:
-                log.info("[STREAM] Response status: %s", resp.status_code)
-                if resp.status_code != 200:
-                    body = ""
-                    async for line in resp.aiter_lines():
-                        body += line
-                    log.error("[STREAM] Error body: %s", body)
-                    if self._is_chain_error(resp.status_code, body):
-                        raise ChainResetError(f"{resp.status_code}: {body}")
-                    raise Exception(f"Server error ({resp.status_code}): {body}")
 
-                completed = False
-                line_count = 0
-                # Track tool_use_id -> name for result display
-                tool_names: dict[str, str] = {}
-                async for line in resp.aiter_lines():
-                    line_count += 1
-                    if line_count <= 5 or line.startswith("data: ") and "completed" in line:
-                        log.info("[STREAM] Line %d: %s", line_count, line[:200])
+        _SENTINEL = object()
+        queue: asyncio.Queue = asyncio.Queue()
 
-                    if not line.startswith("data: "):
-                        continue
-
-                    try:
-                        event = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
-
-                    event_type = event.get("type", "")
-
-                    if event_type == "response.output_text.delta":
-                        delta = event.get("delta", "")
-                        if delta:
-                            yield delta
-
-                    elif event_type == "response.task_started":
-                        desc = event.get("description", "")
-                        if desc:
-                            yield f"\n\n> ⏳ **Task**: {desc}\n"
-
-                    elif event_type == "response.task_progress":
-                        desc = event.get("description", "")
-                        tool = event.get("last_tool_name", "")
-                        usage = event.get("usage") or {}
-                        uses = usage.get("tool_uses", 0)
-                        text = f"\n> 🔄 **Progress**: {desc}"
-                        if tool:
-                            text += f" ({tool}, {uses}회)"
-                        yield text + "\n"
-
-                    elif event_type == "response.task_notification":
-                        status = event.get("status", "")
-                        summary = event.get("summary", "")
-                        if summary:
-                            yield f"\n> ✅ **Task {status}**: {summary}\n\n"
-
-                    elif event_type == "response.tool_use":
-                        tool_id = event.get("tool_use_id", "")
-                        name = event.get("name", "")
-                        if tool_id:
-                            tool_names[tool_id] = name
-
-                    elif event_type == "response.tool_result":
-                        tool_id = event.get("tool_use_id", "")
-                        is_error = event.get("is_error", False)
-                        tool_name = tool_names.get(tool_id, "")
-                        prefix = "❌" if is_error else "📎"
-                        if tool_name:
-                            label = f"{prefix} {html.escape(tool_name)} — {'Error' if is_error else 'Result'}"
-                        else:
-                            label = f"{prefix} {'Error' if is_error else 'Result'}"
-                        result_text = str(event.get("content", ""))[:500]
-                        yield (
-                            f"\n<details>\n<summary>{label}</summary>\n\n"
-                            f"````\n{result_text}\n````\n\n</details>\n"
-                        )
-
-                    elif event_type == "response.completed":
-                        completed = True
-                        response_obj = event.get("response", {})
-                        new_id = response_obj.get("id", "")
-                        if new_id and chat_id:
-                            self.chat_state[chat_id] = {
-                                "previous_response_id": new_id,
-                                "instructions_hash": instructions_hash,
-                                "model": self.valves.MODEL,
-                            }
-                            log.debug("Chain updated: chat=%s, response_id=%s", chat_id, new_id)
-                        # Flush a trailing newline so the markdown renderer
-                        # finalizes the last HTML block (e.g. </details>)
-                        yield "\n"
-
-                    elif event_type in ("response.failed", "error"):
-                        error = event.get("response", {}).get("error", {})
-                        if not error:
-                            error = {
-                                "code": event.get("code", "unknown"),
-                                "message": event.get("message", "Unknown error"),
-                            }
-                        error_msg = error.get("message", "Unknown error")
-                        error_code = error.get("code", "")
-                        if error_code in ("sdk_error", "empty_response", "server_error"):
-                            raise Exception(f"Response failed: {error_msg}")
-                        raise ChainResetError(f"Response failed: {error_code} - {error_msg}")
-
-                log.info(
-                    "[STREAM] Stream ended. lines=%d, completed=%s, chat=%s",
-                    line_count,
-                    completed,
-                    chat_id,
+        async def _fetch() -> None:
+            """Read the SSE stream inside its own task (cancel-scope safe)."""
+            try:
+                timeout = httpx.Timeout(
+                    connect=30.0,
+                    read=60.0,
+                    write=30.0,
+                    pool=float(self.valves.TIMEOUT),
                 )
-                if not completed:
-                    log.warning("[STREAM] No response.completed event received!")
-                    yield "\n\n[Warning: Response may be incomplete]"
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    async with client.stream(
+                        "POST",
+                        self._responses_url(),
+                        json=payload,
+                        headers=self._make_headers(),
+                    ) as resp:
+                        log.info("[STREAM] Response status: %s", resp.status_code)
+                        if resp.status_code != 200:
+                            body = ""
+                            async for line in resp.aiter_lines():
+                                body += line
+                            log.error("[STREAM] Error body: %s", body)
+                            await queue.put(("error", resp.status_code, body))
+                            return
+
+                        async for line in resp.aiter_lines():
+                            await queue.put(("line", line))
+            except Exception as exc:
+                await queue.put(("exception", exc))
+            finally:
+                await queue.put(("done", _SENTINEL))
+
+        task = asyncio.create_task(_fetch())
+
+        try:
+            completed = False
+            line_count = 0
+            tool_names: dict[str, str] = {}
+
+            while True:
+                msg = await queue.get()
+
+                if msg[0] == "done":
+                    break
+
+                if msg[0] == "error":
+                    _, status_code, body = msg
+                    if self._is_chain_error(status_code, body):
+                        raise ChainResetError(f"{status_code}: {body}")
+                    raise Exception(f"Server error ({status_code}): {body}")
+
+                if msg[0] == "exception":
+                    raise msg[1]
+
+                # msg[0] == "line"
+                line = msg[1]
+                line_count += 1
+                if line_count <= 5 or line.startswith("data: ") and "completed" in line:
+                    log.info("[STREAM] Line %d: %s", line_count, line[:200])
+
+                if not line.startswith("data: "):
+                    continue
+
+                try:
+                    event = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type", "")
+
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta", "")
+                    if delta:
+                        yield delta
+
+                elif event_type == "response.task_started":
+                    desc = event.get("description", "")
+                    if desc:
+                        yield f"\n\n> ⏳ **Task**: {desc}\n"
+
+                elif event_type == "response.task_progress":
+                    desc = event.get("description", "")
+                    tool = event.get("last_tool_name", "")
+                    usage = event.get("usage") or {}
+                    uses = usage.get("tool_uses", 0)
+                    text = f"\n> 🔄 **Progress**: {desc}"
+                    if tool:
+                        text += f" ({tool}, {uses}회)"
+                    yield text + "\n"
+
+                elif event_type == "response.task_notification":
+                    status = event.get("status", "")
+                    summary = event.get("summary", "")
+                    if summary:
+                        yield f"\n> ✅ **Task {status}**: {summary}\n\n"
+
+                elif event_type == "response.tool_use":
+                    tool_id = event.get("tool_use_id", "")
+                    name = event.get("name", "")
+                    if tool_id:
+                        tool_names[tool_id] = name
+
+                elif event_type == "response.tool_result":
+                    tool_id = event.get("tool_use_id", "")
+                    is_error = event.get("is_error", False)
+                    tool_name = tool_names.get(tool_id, "")
+                    prefix = "❌" if is_error else "📎"
+                    if tool_name:
+                        label = f"{prefix} {html.escape(tool_name)} — {'Error' if is_error else 'Result'}"
+                    else:
+                        label = f"{prefix} {'Error' if is_error else 'Result'}"
+                    result_text = str(event.get("content", ""))[:500]
+                    yield (
+                        f"\n<details>\n<summary>{label}</summary>\n\n"
+                        f"````\n{result_text}\n````\n\n</details>\n"
+                    )
+
+                elif event_type == "response.completed":
+                    completed = True
+                    response_obj = event.get("response", {})
+                    new_id = response_obj.get("id", "")
+                    if new_id and chat_id:
+                        self.chat_state[chat_id] = {
+                            "previous_response_id": new_id,
+                            "instructions_hash": instructions_hash,
+                            "model": self.valves.MODEL,
+                        }
+                        log.debug("Chain updated: chat=%s, response_id=%s", chat_id, new_id)
+                    yield "\n"
+
+                elif event_type in ("response.failed", "error"):
+                    error = event.get("response", {}).get("error", {})
+                    if not error:
+                        error = {
+                            "code": event.get("code", "unknown"),
+                            "message": event.get("message", "Unknown error"),
+                        }
+                    error_msg = error.get("message", "Unknown error")
+                    error_code = error.get("code", "")
+                    if error_code in ("sdk_error", "empty_response", "server_error"):
+                        raise Exception(f"Response failed: {error_msg}")
+                    raise ChainResetError(f"Response failed: {error_code} - {error_msg}")
+
+            log.info(
+                "[STREAM] Stream ended. lines=%d, completed=%s, chat=%s",
+                line_count,
+                completed,
+                chat_id,
+            )
+            if not completed:
+                log.warning("[STREAM] No response.completed event received!")
+                yield "\n\n[Warning: Response may be incomplete]"
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def _fallback_chat_completions(self, body: dict) -> str:
         url = f"{self.valves.BASE_URL.rstrip('/')}/v1/chat/completions"
