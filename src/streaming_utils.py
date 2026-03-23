@@ -725,6 +725,10 @@ async def _keepalive_wrapper(
         except Exception as exc:
             await queue.put(exc)
         finally:
+            try:
+                await source.aclose()
+            except Exception:
+                pass  # generator already closed or subprocess dead
             await queue.put(_SENTINEL)
 
     task = asyncio.create_task(_reader())
@@ -745,7 +749,7 @@ async def _keepalive_wrapper(
         task.cancel()
         try:
             await task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, Exception):
             pass
 
 

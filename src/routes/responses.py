@@ -300,8 +300,8 @@ async def create_response(
                     finally:
                         try:
                             await chunk_source.aclose()
-                        except RuntimeError:
-                            pass  # generator already running/closed
+                        except Exception:
+                            pass  # generator already running/closed or subprocess dead
                         await sse_queue.put(("done", _SENTINEL))
 
                 reader_task = asyncio.create_task(_sdk_reader())
