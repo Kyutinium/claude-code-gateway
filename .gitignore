@@ -45,6 +45,7 @@ htmlcov/
 
 # Claude Code
 .ccb/
+.claude/skills/
 opencode.json
 
 # Development documentation
