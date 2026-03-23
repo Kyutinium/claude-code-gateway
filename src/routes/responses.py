@@ -298,7 +298,10 @@ async def create_response(
                     except Exception as exc:
                         await sse_queue.put(("error", exc))
                     finally:
-                        await chunk_source.aclose()
+                        try:
+                            await chunk_source.aclose()
+                        except RuntimeError:
+                            pass  # generator already running/closed
                         await sse_queue.put(("done", _SENTINEL))
 
                 reader_task = asyncio.create_task(_sdk_reader())
@@ -314,7 +317,7 @@ async def create_response(
                     reader_task.cancel()
                     try:
                         await reader_task
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, RuntimeError):
                         pass
 
                 # ALWAYS capture provider_session_id (even on failure).
