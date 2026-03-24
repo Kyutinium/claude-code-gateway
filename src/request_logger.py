@@ -192,7 +192,9 @@ class RequestLogger:
                 "error_count": 0,
                 "error_rate": 0.0,
                 "avg_latency_ms": 0.0,
+                "p50_latency_ms": 0.0,
                 "p95_latency_ms": 0.0,
+                "p99_latency_ms": 0.0,
             }
 
         latencies = sorted(e.response_time_ms for e in entries)
