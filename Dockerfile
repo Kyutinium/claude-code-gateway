@@ -18,5 +18,5 @@ RUN uv sync
 # Expose the port (default 8000)
 EXPOSE 8000
 
-# Run the app with Uvicorn (development mode with reload; switch to --no-reload for prod)
-CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Run the app with Uvicorn
+CMD ["uv", "run", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
