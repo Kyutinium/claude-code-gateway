@@ -8,9 +8,12 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -481,3 +484,172 @@ def get_redacted_config() -> Dict[str, Any]:
         "_note": "Values marked ***REDACTED*** contain secrets. "
         "Most settings require server restart to take effect.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Skills management
+# ---------------------------------------------------------------------------
+
+# Valid skill name: lowercase alphanumeric + hyphens, must start with a letter/digit
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+_SKILL_DIR_PREFIX = ".claude/skills/"
+
+
+def _parse_skill_frontmatter(content: str) -> Dict[str, Any]:
+    """Parse YAML frontmatter from a SKILL.md file.
+
+    Returns parsed metadata dict.  Falls back to empty dict on parse errors.
+    """
+    if not content.startswith("---"):
+        return {}
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        meta = yaml.safe_load(parts[1])
+        return meta if isinstance(meta, dict) else {}
+    except yaml.YAMLError:
+        return {}
+
+
+def _skill_body(content: str) -> str:
+    """Return the markdown body after the frontmatter block."""
+    if not content.startswith("---"):
+        return content
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return content
+    return parts[2].lstrip("\n")
+
+
+def list_skills() -> List[Dict[str, Any]]:
+    """List all skills in ``.claude/skills/``.
+
+    Scans for ``SKILL.md`` files inside each subdirectory and parses their
+    YAML frontmatter for metadata.
+    """
+    root = get_workspace_root()
+    skills_dir = root / ".claude" / "skills"
+    result: List[Dict[str, Any]] = []
+
+    if not skills_dir.is_dir():
+        return result
+
+    # Skip if skills_dir itself or any ancestor (.claude) is a symlink
+    if skills_dir.is_symlink() or _has_symlink_ancestor(skills_dir, root):
+        return result
+
+    for child in sorted(skills_dir.iterdir()):
+        if not child.is_dir() or child.is_symlink():
+            continue
+        skill_file = child / "SKILL.md"
+        if not skill_file.is_file() or skill_file.is_symlink():
+            continue
+        try:
+            stat = skill_file.stat()
+            if stat.st_size > MAX_FILE_SIZE:
+                continue
+            raw = skill_file.read_bytes()
+            text = raw.decode("utf-8")
+            meta = _parse_skill_frontmatter(text)
+            result.append(
+                {
+                    "name": child.name,
+                    "description": meta.get("description", ""),
+                    "version": meta.get("metadata", {}).get("version", "")
+                    if isinstance(meta.get("metadata"), dict)
+                    else "",
+                    "author": meta.get("metadata", {}).get("author", "")
+                    if isinstance(meta.get("metadata"), dict)
+                    else "",
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                }
+            )
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    return result
+
+
+def get_skill(name: str) -> Tuple[Dict[str, Any], str, str]:
+    """Read a single skill.
+
+    Returns ``(metadata, content, etag)`` where *metadata* is the parsed
+    frontmatter and *content* is the full file text.
+
+    Raises ``FileNotFoundError`` if the skill does not exist.
+    Raises ``ValueError`` for invalid skill names.
+    """
+    _validate_skill_name(name)
+    rel_path = f"{_SKILL_DIR_PREFIX}{name}/SKILL.md"
+    target = validate_file_path(rel_path)
+    validate_file_for_read(target)
+
+    raw = target.read_bytes()
+    text = raw.decode("utf-8")
+    meta = _parse_skill_frontmatter(text)
+    etag = compute_etag(raw)
+    return meta, text, etag
+
+
+def create_or_update_skill(
+    name: str,
+    content: str,
+    expected_etag: Optional[str] = None,
+) -> Tuple[str, bool]:
+    """Create or update a skill.
+
+    Returns ``(new_etag, created)`` where *created* is ``True`` when a new
+    skill directory was made.
+
+    Raises ``ValueError`` for invalid names, oversized content, or ETag
+    mismatches.
+    """
+    _validate_skill_name(name)
+    rel_path = f"{_SKILL_DIR_PREFIX}{name}/SKILL.md"
+    target = validate_file_path(rel_path)
+
+    created = not target.is_file()
+    new_etag = write_file(rel_path, content, expected_etag)
+    return new_etag, created
+
+
+def delete_skill(name: str) -> None:
+    """Delete a skill directory and all its contents.
+
+    Raises ``FileNotFoundError`` if the skill does not exist.
+    Raises ``ValueError`` for invalid skill names.
+    """
+    _validate_skill_name(name)
+    root = get_workspace_root()
+    skill_dir = root / ".claude" / "skills" / name
+
+    # Security: reject symlink ancestors (.claude or .claude/skills being symlinks)
+    if _has_symlink_ancestor(skill_dir, root):
+        raise ValueError("Symlinks in path ancestors are not allowed")
+
+    # Security: ensure the path is within the workspace
+    try:
+        skill_dir.resolve().relative_to(root.resolve())
+    except ValueError:
+        raise ValueError("Path escapes workspace root")
+
+    if not skill_dir.is_dir():
+        raise FileNotFoundError(f"Skill not found: {name}")
+
+    if skill_dir.is_symlink():
+        raise ValueError("Symlinks are not allowed")
+
+    shutil.rmtree(skill_dir)
+    logger.info(f"Admin: deleted skill '{name}'")
+
+
+def _validate_skill_name(name: str) -> None:
+    """Raise ``ValueError`` if *name* is not a valid skill identifier."""
+    if not name or not _SKILL_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid skill name: '{name}'. "
+            "Use lowercase letters, digits, and hyphens only (must start with a letter or digit)."
+        )

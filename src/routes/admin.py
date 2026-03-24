@@ -15,6 +15,7 @@ Session delete: DELETE /admin/api/sessions/{session_id}
 Logs:           GET  /admin/api/logs
 Rate limits:    GET  /admin/api/rate-limits
 Session msgs:   GET  /admin/api/sessions/{session_id}/messages
+Skills:         GET/PUT/DELETE /admin/api/skills/{name}
 System prompt:  GET/PUT/DELETE /admin/api/system-prompt
 """
 
@@ -32,8 +33,12 @@ from src.admin_auth import (
     require_admin,
 )
 from src.admin_service import (
+    create_or_update_skill,
+    delete_skill,
     get_redacted_config,
     get_session_messages,
+    get_skill,
+    list_skills,
     list_workspace_files,
     read_file,
     write_file,
@@ -61,6 +66,11 @@ class FileWriteRequest(BaseModel):
 class RuntimeConfigUpdate(BaseModel):
     key: str
     value: Any
+
+
+class SkillWriteRequest(BaseModel):
+    content: str
+    etag: Optional[str] = None
 
 
 class SystemPromptUpdate(BaseModel):
@@ -345,6 +355,66 @@ async def reset_runtime_config(
 
 
 # ---------------------------------------------------------------------------
+# Skills management
+# ---------------------------------------------------------------------------
+
+
+@router.get("/api/skills")
+async def list_skills_endpoint(_=Depends(require_admin)):
+    """List all skills with parsed metadata."""
+    try:
+        return {"skills": list_skills()}
+    except RuntimeError as e:
+        return JSONResponse(status_code=503, content={"error": str(e)})
+
+
+@router.get("/api/skills/{name}")
+async def get_skill_endpoint(name: str, _=Depends(require_admin)):
+    """Read a skill's SKILL.md content and parsed metadata."""
+    try:
+        meta, content, etag = get_skill(name)
+        return {"name": name, "metadata": meta, "content": content, "etag": etag}
+    except FileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@router.put("/api/skills/{name}")
+async def put_skill_endpoint(
+    name: str,
+    body: SkillWriteRequest,
+    _=Depends(require_admin),
+    if_match: Optional[str] = Header(None),
+):
+    """Create or update a skill. Supports If-Match for optimistic concurrency."""
+    expected_etag = body.etag or if_match
+    try:
+        new_etag, created = create_or_update_skill(name, body.content, expected_etag)
+        return JSONResponse(
+            status_code=201 if created else 200,
+            content={"name": name, "etag": new_etag, "status": "created" if created else "updated"},
+        )
+    except ValueError as e:
+        error_msg = str(e)
+        if "ETag mismatch" in error_msg:
+            return JSONResponse(status_code=409, content={"error": error_msg})
+        return JSONResponse(status_code=400, content={"error": error_msg})
+
+
+@router.delete("/api/skills/{name}")
+async def delete_skill_endpoint(name: str, _=Depends(require_admin)):
+    """Delete a skill and its directory."""
+    try:
+        delete_skill(name)
+        return {"name": name, "status": "deleted"}
+    except FileNotFoundError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
 # System Prompt Management
 # ---------------------------------------------------------------------------
 
@@ -352,7 +422,12 @@ async def reset_runtime_config(
 @router.get("/api/system-prompt")
 async def get_system_prompt_endpoint(_=Depends(require_admin)):
     """Return the current system prompt and its mode."""
-    from src.system_prompt import get_default_prompt, get_preset_text, get_prompt_mode, get_system_prompt
+    from src.system_prompt import (
+        get_default_prompt,
+        get_preset_text,
+        get_prompt_mode,
+        get_system_prompt,
+    )
 
     prompt = get_system_prompt()
     return {

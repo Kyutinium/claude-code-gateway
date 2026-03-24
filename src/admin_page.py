@@ -121,6 +121,7 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
         <button :class="{ active: tab === 'logs' }" @click="tab='logs'; loadLogs()">Logs</button>
         <button :class="{ active: tab === 'ratelimits' }" @click="tab='ratelimits'; loadRateLimits()">Rate Limits</button>
         <button :class="{ active: tab === 'files' }" @click="tab='files'; loadFiles()">Workspace</button>
+        <button :class="{ active: tab === 'skills' }" @click="tab='skills'; loadSkills()">Skills</button>
         <button :class="{ active: tab === 'sessions' }" @click="tab='sessions'; loadSummary()">Sessions</button>
         <button :class="{ active: tab === 'config' }" @click="tab='config'; loadConfig(); loadRuntimeConfig(); loadSystemPrompt()">Config</button>
       </nav>
@@ -315,6 +316,70 @@ table td, table th { padding: 8px 12px; border-bottom: 1px solid var(--border); 
                   </div>
                 </div>
                 <textarea x-ref="editorArea" style="display:none"></textarea>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skills Tab -->
+      <div x-show="tab==='skills'">
+        <div class="sidebar">
+          <div class="file-tree card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem">
+              <h3 style="margin:0">Skills</h3>
+              <button class="btn btn-sm btn-primary" @click="showNewSkillForm()">+ New</button>
+            </div>
+            <template x-for="s in skills" :key="s.name">
+              <div class="file-item" :class="{ active: selectedSkill === s.name }" @click="openSkill(s.name)">
+                <span class="icon">&#9881;</span>
+                <div style="flex:1; min-width:0">
+                  <div style="font-size:0.85rem; font-weight:600" x-text="s.name"></div>
+                  <div style="font-size:0.7rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis"
+                    x-text="s.description || '(no description)'"></div>
+                </div>
+              </div>
+            </template>
+            <div x-show="skills.length === 0" style="color:var(--text-muted); font-size:0.85rem; padding:8px 12px">
+              No skills found
+            </div>
+          </div>
+          <div class="editor-area card">
+            <!-- New skill form -->
+            <template x-if="skillCreating">
+              <div style="padding:1rem">
+                <h3 style="margin-top:0">Create New Skill</h3>
+                <label style="font-size:0.8rem; color:var(--text-muted)">Skill Name</label>
+                <input type="text" x-model="newSkillName" placeholder="my-skill-name"
+                  style="width:100%; margin-bottom:0.5rem" @input="validateNewSkillName()">
+                <p x-show="newSkillNameError" style="color:#ef4444; font-size:0.8rem; margin:0 0 0.5rem 0" x-text="newSkillNameError"></p>
+                <div style="display:flex; gap:0.5rem">
+                  <button class="btn btn-sm btn-primary" @click="createSkill()" :disabled="!newSkillName || newSkillNameError">Create</button>
+                  <button class="btn btn-sm btn-ghost" @click="skillCreating = false">Cancel</button>
+                </div>
+              </div>
+            </template>
+            <!-- No skill selected -->
+            <template x-if="!selectedSkill && !skillCreating">
+              <div style="color:var(--text-muted); padding:2rem; text-align:center">
+                Select a skill to edit or create a new one
+              </div>
+            </template>
+            <!-- Skill editor -->
+            <template x-if="selectedSkill && !skillCreating">
+              <div>
+                <div class="editor-toolbar">
+                  <div style="display:flex; align-items:center; gap:0.5rem">
+                    <span class="path" x-text="selectedSkill"></span>
+                    <span style="font-size:0.7rem; color:var(--text-muted)" x-text="(skillMeta.metadata?.version) ? 'v' + skillMeta.metadata.version : ''"></span>
+                  </div>
+                  <div style="display:flex; gap:0.5rem; align-items:center">
+                    <span x-show="skillDirty" class="dirty-dot" title="Unsaved changes"></span>
+                    <button class="btn btn-sm btn-primary" @click="saveSkill()" :disabled="!skillDirty">Save</button>
+                    <button class="btn btn-sm btn-ghost" style="color:#ef4444" @click="confirmDeleteSkill()">Delete</button>
+                  </div>
+                </div>
+                <textarea x-ref="skillEditorArea" style="display:none"></textarea>
               </div>
             </template>
           </div>
@@ -561,6 +626,16 @@ function adminApp() {
     expandedSession: null,
     sessionMessages: null,
     runtimeConfig: {},
+    skills: [],
+    selectedSkill: null,
+    skillContent: '',
+    skillEtag: null,
+    skillDirty: false,
+    skillMeta: {},
+    skillCm: null,
+    skillCreating: false,
+    newSkillName: '',
+    newSkillNameError: '',
     systemPrompt: { mode: 'preset', prompt: null, default_prompt: null, preset_text: null, char_count: 0 },
     systemPromptText: '',
     systemPromptEditing: false,
@@ -775,6 +850,140 @@ function adminApp() {
         const r = await this.api('/admin/api/system-prompt', { method: 'DELETE' });
         if (r.ok) { this.showToast('System prompt reset', 'ok'); await this.loadSystemPrompt(); }
       } catch(e) {}
+    },
+
+    // --- Skills ---
+    async loadSkills() {
+      try {
+        const r = await this.api('/admin/api/skills');
+        if (r.ok) { const d = await r.json(); this.skills = d.skills || []; }
+      } catch(e) {}
+    },
+    async openSkill(name) {
+      if (this.skillDirty && !confirm('Unsaved changes will be lost. Continue?')) return;
+      this.skillCreating = false;
+      try {
+        const r = await this.api('/admin/api/skills/' + encodeURIComponent(name));
+        if (r.ok) {
+          const d = await r.json();
+          this.selectedSkill = name;
+          this.skillContent = d.content;
+          this.skillEtag = d.etag;
+          this.skillMeta = d.metadata || {};
+          this.skillDirty = false;
+          this.$nextTick(() => this.setupSkillEditor());
+        } else {
+          const d = await r.json();
+          this.showToast(d.error || 'Failed to load skill', 'err');
+        }
+      } catch(e) { this.showToast('Connection error', 'err'); }
+    },
+    setupSkillEditor() {
+      const ta = this.$refs.skillEditorArea;
+      if (!ta) return;
+      if (this.skillCm) { this.skillCm.toTextArea(); this.skillCm = null; }
+      ta.value = this.skillContent;
+      this.skillCm = CodeMirror.fromTextArea(ta, {
+        mode: 'markdown', theme: 'material-darker', lineNumbers: true, lineWrapping: true, tabSize: 2
+      });
+      this.skillCm.on('change', () => {
+        this.skillDirty = this.skillCm.getValue() !== this.skillContent;
+      });
+    },
+    async saveSkill() {
+      if (!this.selectedSkill || !this.skillCm) return;
+      const newContent = this.skillCm.getValue();
+      try {
+        const r = await this.api('/admin/api/skills/' + encodeURIComponent(this.selectedSkill), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: newContent, etag: this.skillEtag })
+        });
+        const d = await r.json();
+        if (r.ok || r.status === 201) {
+          this.skillContent = newContent;
+          this.skillEtag = d.etag;
+          this.skillDirty = false;
+          this.showToast('Skill saved', 'ok');
+          await this.loadSkills();
+        } else {
+          this.showToast(d.error || 'Save failed', 'err');
+          if (r.status === 409) {
+            if (confirm('Skill was modified externally. Reload?')) this.openSkill(this.selectedSkill);
+          }
+        }
+      } catch(e) { this.showToast('Connection error', 'err'); }
+    },
+    showNewSkillForm() {
+      if (this.skillDirty && !confirm('Unsaved changes will be lost. Continue?')) return;
+      this.skillCreating = true;
+      this.selectedSkill = null;
+      this.skillDirty = false;
+      this.newSkillName = '';
+      this.newSkillNameError = '';
+      if (this.skillCm) { this.skillCm.toTextArea(); this.skillCm = null; }
+    },
+    validateNewSkillName() {
+      const n = this.newSkillName;
+      if (!n) { this.newSkillNameError = ''; return; }
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(n)) {
+        this.newSkillNameError = 'Lowercase letters, digits, and hyphens only (start with letter/digit)';
+        return;
+      }
+      if (this.skills.some(s => s.name === n)) {
+        this.newSkillNameError = 'Skill already exists';
+        return;
+      }
+      this.newSkillNameError = '';
+    },
+    async createSkill() {
+      if (!this.newSkillName || this.newSkillNameError) return;
+      const name = this.newSkillName;
+      const template = `---
+name: ${name}
+description: ""
+metadata:
+  author: ""
+  version: "1.0.0"
+---
+
+# ${name}
+
+Skill description here.
+`;
+      try {
+        const r = await this.api('/admin/api/skills/' + encodeURIComponent(name), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: template })
+        });
+        if (r.ok || r.status === 201) {
+          this.skillCreating = false;
+          this.showToast('Skill created: ' + name, 'ok');
+          await this.loadSkills();
+          await this.openSkill(name);
+        } else {
+          const d = await r.json();
+          this.showToast(d.error || 'Create failed', 'err');
+        }
+      } catch(e) { this.showToast('Connection error', 'err'); }
+    },
+    async confirmDeleteSkill() {
+      if (!this.selectedSkill) return;
+      if (!confirm('Delete skill "' + this.selectedSkill + '"? This cannot be undone.')) return;
+      try {
+        const r = await this.api('/admin/api/skills/' + encodeURIComponent(this.selectedSkill), { method: 'DELETE' });
+        if (r.ok) {
+          this.showToast('Skill deleted', 'ok');
+          if (this.skillCm) { this.skillCm.toTextArea(); this.skillCm = null; }
+          this.selectedSkill = null;
+          this.skillDirty = false;
+          await this.loadSkills();
+        } else {
+          const d = await r.json();
+          this.showToast(d.error || 'Delete failed', 'err');
+        }
+      } catch(e) { this.showToast('Connection error', 'err'); }
     },
 
     // --- Session Messages ---
