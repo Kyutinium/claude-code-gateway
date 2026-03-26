@@ -514,19 +514,20 @@ async def delete_skill_endpoint(name: str, _=Depends(require_admin)):
 async def get_system_prompt_endpoint(_=Depends(require_admin)):
     """Return the current system prompt and its mode."""
     from src.system_prompt import (
-        get_default_prompt,
         get_preset_text,
         get_prompt_mode,
+        get_raw_system_prompt,
         get_system_prompt,
     )
 
-    prompt = get_system_prompt()
+    raw = get_raw_system_prompt()
+    resolved = get_system_prompt()
     return {
         "mode": get_prompt_mode(),
-        "prompt": prompt,
-        "default_prompt": get_default_prompt(),
+        "prompt": raw,
+        "resolved_prompt": resolved,
         "preset_text": get_preset_text(),
-        "char_count": len(prompt) if prompt else 0,
+        "char_count": len(resolved) if resolved else 0,
     }
 
 

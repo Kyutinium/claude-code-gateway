@@ -22,8 +22,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _lock = Lock()
-_default_prompt: Optional[str] = None  # loaded from file at startup
-_runtime_prompt: Optional[str] = None  # admin override
+_default_prompt: Optional[str] = None  # loaded from file at startup (resolved)
+_default_prompt_raw: Optional[str] = None  # loaded from file at startup (original)
+_runtime_prompt: Optional[str] = None  # admin override (resolved)
+_runtime_prompt_raw: Optional[str] = None  # admin override (original)
 _preset_text: Optional[str] = None  # cached preset reference text
 
 _DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -93,10 +95,11 @@ def load_default_prompt(file_path: str = "") -> None:
     * If *file_path* is empty/blank, preset mode is used (no custom prompt).
     * If the file does not exist, ``FileNotFoundError`` is raised (fail-fast).
     """
-    global _default_prompt, _runtime_prompt
+    global _default_prompt, _default_prompt_raw, _runtime_prompt, _runtime_prompt_raw
 
     if not file_path or not file_path.strip():
         _default_prompt = None
+        _default_prompt_raw = None
         logger.info("System prompt: using claude_code preset (no file configured)")
     else:
         path = Path(file_path)
@@ -106,8 +109,10 @@ def load_default_prompt(file_path: str = "") -> None:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             _default_prompt = None
+            _default_prompt_raw = None
             logger.warning("System prompt file is empty, falling back to preset mode")
         else:
+            _default_prompt_raw = content
             _default_prompt = _resolve_placeholders(content)
             logger.info("System prompt: loaded from file (%d chars)", len(_default_prompt))
 
@@ -116,6 +121,7 @@ def load_default_prompt(file_path: str = "") -> None:
     if persisted:
         resolved = _resolve_placeholders(persisted)
         with _lock:
+            _runtime_prompt_raw = persisted
             _runtime_prompt = resolved
         logger.info("System prompt: restored persisted override (%d chars)", len(resolved))
 
@@ -136,19 +142,31 @@ def get_default_prompt() -> Optional[str]:
     return _default_prompt
 
 
+def get_raw_system_prompt() -> Optional[str]:
+    """Return the active prompt with original ``{{PLACEHOLDER}}`` tokens intact.
+
+    Used by the admin UI so editors see placeholders, not resolved values.
+    """
+    with _lock:
+        if _runtime_prompt_raw is not None:
+            return _runtime_prompt_raw
+    return _default_prompt_raw
+
+
 def set_system_prompt(text: str) -> None:
     """Set a runtime override for the system prompt and persist to disk.
 
     Raises ``ValueError`` if *text* is empty or whitespace-only.
     Raises ``OSError`` if the persist file cannot be written.
     """
-    global _runtime_prompt
+    global _runtime_prompt, _runtime_prompt_raw
     stripped = text.strip()
     if not stripped:
         raise ValueError("System prompt cannot be empty. Use reset to revert to default.")
     _save_persisted(stripped)
     resolved = _resolve_placeholders(stripped)
     with _lock:
+        _runtime_prompt_raw = stripped
         _runtime_prompt = resolved
     logger.info("System prompt: runtime override set (%d chars)", len(stripped))
 
@@ -158,10 +176,11 @@ def reset_system_prompt() -> None:
 
     Raises ``OSError`` if the persist file cannot be removed.
     """
-    global _runtime_prompt
+    global _runtime_prompt, _runtime_prompt_raw
     _save_persisted(None)
     with _lock:
         _runtime_prompt = None
+        _runtime_prompt_raw = None
     logger.info("System prompt: runtime override cleared")
 
 

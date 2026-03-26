@@ -85,7 +85,9 @@ class RecordingClaudeBackend:
 def _reset_system_prompt(tmp_path):
     """Reset module-level state and isolate persistence before/after each test."""
     sp._default_prompt = None
+    sp._default_prompt_raw = None
     sp._runtime_prompt = None
+    sp._runtime_prompt_raw = None
     orig_data_dir = sp._DATA_DIR
     orig_persist = sp._PERSIST_FILE
     sp._DATA_DIR = tmp_path
@@ -97,7 +99,9 @@ def _reset_system_prompt(tmp_path):
             pass
     yield
     sp._default_prompt = None
+    sp._default_prompt_raw = None
     sp._runtime_prompt = None
+    sp._runtime_prompt_raw = None
     sp._DATA_DIR = orig_data_dir
     sp._PERSIST_FILE = orig_persist
 

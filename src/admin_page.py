@@ -824,7 +824,7 @@ function adminApp() {
     newSkillNameError: '',
     toolsRegistry: {},
     sandboxConfig: {},
-    systemPrompt: { mode: 'preset', prompt: null, default_prompt: null, preset_text: null, char_count: 0 },
+    systemPrompt: { mode: 'preset', prompt: null, resolved_prompt: null, preset_text: null, char_count: 0 },
     systemPromptText: '',
     systemPromptEditing: false,
 
